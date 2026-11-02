@@ -1,0 +1,4 @@
+// Copy to Local.xcconfig. A stable signing identity keeps macOS privacy grants
+// (Automation, notifications, login items) across rebuilds; ad-hoc signatures do not.
+CODE_SIGN_IDENTITY = Apple Development
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
