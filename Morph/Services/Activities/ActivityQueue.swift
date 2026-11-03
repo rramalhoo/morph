@@ -9,6 +9,8 @@ import Foundation
 /// - While held (the user is in the island), only `.timer` and above may present.
 /// - While a control is being dragged, only `.critical` may present, and nothing is taken away.
 /// - Queued activities that waited past `maximumWait` are dropped rather than shown late.
+/// - While suppressed (the session is locked or away), nothing presents and private activities
+///   are dropped. Anything else waits, and still expires on its own `maximumWait`.
 struct ActivityQueue: Sendable {
     enum Outcome: Equatable, Sendable {
         case presented
@@ -24,8 +26,10 @@ struct ActivityQueue: Sendable {
     private(set) var pending: [IslandActivity] = []
     private(set) var isHeld = false
     private(set) var isInteracting = false
+    private(set) var isSuppressed = false
 
     private func canPresent(_ activity: IslandActivity) -> Bool {
+        if isSuppressed { return false }
         if isInteracting { return activity.priority >= .critical }
         return !isHeld || activity.priority >= .timer
     }
@@ -109,6 +113,18 @@ struct ActivityQueue: Sendable {
         } else {
             promote(at: now)
         }
+    }
+
+    mutating func setSuppressed(_ suppressed: Bool, at now: ContinuousClock.Instant) {
+        guard suppressed != isSuppressed else { return }
+        isSuppressed = suppressed
+        guard suppressed else {
+            promote(at: now)
+            return
+        }
+        if let showing = current, showing.resumesAfterInterruption, !showing.content.isPrivate { insert(showing) }
+        current = nil
+        pending.removeAll { $0.content.isPrivate }
     }
 
     mutating func setInteracting(_ interacting: Bool, at now: ContinuousClock.Instant) {

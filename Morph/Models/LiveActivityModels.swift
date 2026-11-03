@@ -161,3 +161,64 @@ struct LiveActivityPayload: Equatable, Sendable {
         return option
     }
 }
+
+/// A transfer reported by a script or app. Same rules as activities: every field checked, unknown
+/// fields refused, nothing treated as a path.
+struct TransferPayload: Equatable, Sendable {
+    private static let fields: Set<String> = ["id", "name", "kind", "bytes", "total", "state", "error"]
+    static let maximumBytes: Int64 = 1 << 50
+
+    var id: String?
+    var name: String?
+    var kind: TransferKind?
+    var bytes: Int64?
+    var total: Int64?
+    var state: TransferState?
+    var error: String?
+
+    init(json data: Data) throws {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LiveActivityValidationError.malformed
+        }
+        if let unknown = object.keys.sorted().first(where: { !Self.fields.contains($0) }) {
+            throw LiveActivityValidationError.unknownField(unknown)
+        }
+        // Reuses the activity rules for text, so the two can't drift apart.
+        var check: [String: Any] = [:]
+        for key in ["id", "name", "error"] { if let value = object[key] { check[key == "name" ? "title" : key == "error" ? "subtitle" : key] = value } }
+        let text = try LiveActivityPayload(json: JSONSerialization.data(withJSONObject: check))
+        id = text.id
+        name = text.title
+        error = text.subtitle
+        if let name, name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw LiveActivityValidationError.invalid("name can't be empty")
+        }
+        if let raw = object["kind"] {
+            guard let value = raw as? String, let kind = TransferKind(rawValue: value), kind == .download || kind == .upload else {
+                throw LiveActivityValidationError.invalid("kind must be download or upload")
+            }
+            self.kind = kind
+        }
+        bytes = try Self.count(object, "bytes")
+        total = try Self.count(object, "total")
+        if let raw = object["state"] {
+            guard let value = raw as? String, let state = TransferState(rawValue: value), state != .unknown else {
+                throw LiveActivityValidationError.invalid("state has an unknown value")
+            }
+            self.state = state
+        }
+        if let bytes, let total, bytes > total {
+            throw LiveActivityValidationError.invalid("bytes can't exceed total")
+        }
+    }
+
+    private static func count(_ object: [String: Any], _ key: String) throws -> Int64? {
+        guard let value = object[key] else { return nil }
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue == number.doubleValue.rounded(),
+              number.int64Value >= 0, number.int64Value <= maximumBytes else {
+            throw LiveActivityValidationError.invalid("\(key) must be a whole number of bytes")
+        }
+        return number.int64Value
+    }
+}

@@ -19,6 +19,8 @@ open build/DerivedData/Build/Products/Release/Morph.app
 
 Or open `Morph.xcodeproj` in Xcode and run the **Morph** scheme. Without `Local.xcconfig` the build is ad-hoc signed, which works, but macOS will ask for permissions again after each rebuild.
 
+Xcode builds into its own DerivedData, not `build/DerivedData`, so the two can hold different versions with the same bundle ID. Quit Morph before opening a new build, and check **Settings › Advanced › Diagnostics**: its first lines give the running version and path.
+
 Run the tests:
 
 ```bash
@@ -69,7 +71,7 @@ Morph appears on the display with a notch by default. On a display without one i
 | Notifications | Optional timer alert | Only if you enable it |
 | Dropped files, read-only | Shelf keeps a bookmark and never copies the file | Implicit in the drop |
 | Network client | Spotify artwork from `https` URLs only | Never prompts |
-| Accessibility | Only for Replace macOS Volume/Brightness HUD: an active event tap limited to `NX_SYSDEFINED` events, so it never sees typing | When you turn a Replace option on |
+| Accessibility | Only for Replace macOS Volume/Brightness HUD: an active event tap limited to `NX_SYSDEFINED` events, so it never sees typing. Volume replacement is on by default, so the volume keys move in exact 5% steps (Settings → System → Volume Step: 2%, 5% or 10%) | At first launch for volume, or when you turn brightness replacement on. Until granted, macOS keeps the keys |
 | Screenshot folder, read-only | The one folder you choose in Settings → Screenshots, kept as a security-scoped bookmark | When you choose it |
 | Network server, loopback only | The optional local API. No socket exists while it's off | Never prompts |
 | Keychain | The local API's token | Only when you turn the API on |
@@ -141,6 +143,47 @@ There is no public macOS API for system-wide Now Playing. `MediaRemote` is priva
 | Gestures | Scroll events delivered to the island's own window | Two fingers only. Three- and four-finger swipes belong to the system. |
 
 System output volume changes aren't reported while the panel is open, because its slider already shows them. The mute button and slider act on the real output, and on outputs without software volume the player's own volume slider appears instead.
+
+## Lock Screen (3.0)
+
+Morph follows lock, unlock, sleep and fast user switching through public notifications (`NSWorkspace` session, sleep and display notifications) and the long-standing `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked` distributed notifications, cross-checked with `CGSessionCopyCurrentDictionary`. `LockScreenCoordinator` owns one testable state machine (`active`, `locking`, `locked`, `unlocking`, `suspended`, `unknown`). A dark display alone is never taken as a lock.
+
+- **On lock:** private activities (screenshots, Live API activities, now playing, files) are dropped, the panel and any drag end, the island collapses to the notch, audio capture stops, volume and brightness keys go back to macOS, and the panel leaves the screen once the lock settles.
+- **On unlock:** the window returns on the right display with fresh notch geometry, services resynchronize, activities that are still current come back, and the Welcome Island greets once per unlock (time-of-day greeting in the system language, time, battery, music if playing). Waking without a password, changing displays or returning while the island is busy doesn't welcome.
+- **Music:** keeps playing in Apple Music or Spotify. Morph doesn't pause it and doesn't capture audio while locked.
+- **Notifications:** timer and focus notifications are scheduled ahead with `UserNotifications`, so macOS delivers them while locked. Battery, device and activity notifications are only sent when the island can't show them, are rate-limited, and name nothing unless *Allow Sensitive Previews* is on.
+
+Settings: **Lock Screen** and **Notifications** sections. Notification permission is asked when a notification switch is turned on; a denied permission is never asked again from Morph, only changed in System Settings › Notifications.
+
+### Limitations
+
+- **No public API lets an app draw over the macOS lock screen.** Morph shows nothing while locked, including no music player. The lock screen's own Now Playing controls come from macOS.
+- Whether notifications appear on the lock screen, and with previews, is decided by macOS and the user's Notification settings.
+- The lock animation is only visible if macOS still draws apps when the lock begins; usually the lock screen covers it at once.
+- `com.apple.screenIsLocked` and the `CGSSessionScreenIsLocked` key are long-standing but undocumented. If they stop working, Morph treats the session as unlocked rather than guessing.
+- No calendar integration, so the welcome never shows appointments.
+
+### Manual tests (not yet run on hardware)
+
+Lock with Control-Command-Q; unlock with password and with Touch ID; play music through a lock; let a timer end while locked (with *Notify When Timer Ends* on); sleep and wake; switch users and back; several quick lock/unlock cycles; MacBook with an external display. After each unlock, press the volume keys and confirm 5% steps with Morph's HUD. **Settings › Advanced › Diagnostics** shows the session state and return count.
+
+## Transfers, AirDrop and Continuity (3.1)
+
+- **Transfers:** one `TransferManager` for downloads, uploads and AirDrop (`pending`, `transferring`, `paused`, `completed`, `failed`, `cancelled`, `unknown`), with bytes, a known total, measured speed and remaining time. Percentages appear only when the total is known. Updates reach the island at most twice a second and group into one activity, so several transfers don't make the island bounce. A panel tab lists active and recent transfers; history is memory-only and its duration is configurable.
+- **Downloads:** only through a folder you choose (Settings › Transfers). Browser partial files mean "in progress"; a finished file counts only with a fresh quarantine marker, so copied or saved files aren't called downloads.
+- **Uploads:** reported by scripts or apps to `/v1/transfers` on the existing local API (still off by default). Morph can't see other apps' traffic.
+- **AirDrop:** send from the Shelf with macOS's own picker. Received files are recognized by their quarantine agent (`sharingd`) once they've arrived. The ring fills with real progress when there is any and turns slowly when there isn't, then becomes a checkmark.
+- **iPhone Continuity:** there's no public API for reading other apps' Live Activities, mirrored or not. Morph shows activities from **Morph Companion** (`Companion/MorphCompanion.xcodeproj`, iOS 17+) paired by QR code, with end-to-end encryption over the local network, revocation, expiry and rate limits.
+
+Details, the API and examples in curl, Python and Swift: [docs/TRANSFERS_AND_CONTINUITY.md](docs/TRANSFERS_AND_CONTINUITY.md).
+
+### Installing Morph Companion
+
+Open `Companion/MorphCompanion.xcodeproj` in Xcode, choose your team under Signing (a free Apple ID works for your own iPhone), connect the iPhone and run. Then on the Mac: Settings › Continuity › Enable iPhone Sync › Pair iPhone…, and scan the code with the iPhone's Camera. Both devices must be on the same network.
+
+### Manual tests (not yet run on hardware)
+
+A real download in Safari, Chrome and Firefox into the watched folder; an upload reported by a script; AirDrop sending from the Shelf and receiving a file from an iPhone; pairing the Companion on a real iPhone, reconnecting after Wi-Fi drops, revoking it; activities with a countdown; lock and unlock during a transfer. Automated tests simulate these; they don't replace them.
 
 ## Not implemented
 

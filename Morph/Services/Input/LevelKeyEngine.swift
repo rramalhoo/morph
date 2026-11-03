@@ -15,8 +15,12 @@ enum LevelKeyDecision: Equatable, Sendable {
 ///
 /// Runs on the event tap's thread, so it must stay quick: a tap that stalls delays input.
 struct LevelKeyEngine: Sendable {
-    static let standardStep: Float = 1.0 / 16
-    static let fineStep: Float = 1.0 / 64
+    /// Volume and brightness move in whole percentage points, so the HUD shows exactly the level
+    /// that was set. Shift and Option together move one point.
+    static let finePoints = 1
+    /// A device coarser than the step may round a request back to where it was. Going one grid
+    /// point further, a few times at most, finds its next real level.
+    private static let coarseRetries = 3
     private static let tolerance: Float = 0.002
 
     var policy = LevelKeyPolicy.off
@@ -30,7 +34,7 @@ struct LevelKeyEngine: Sendable {
     private var brightnessRejected = false
     private var consumedDowns: Set<LevelKey> = []
     /// Devices can quantize a request. Stepping from what was asked keeps steps even.
-    private var lastVolume: (device: UInt32, requested: Float, reported: Float)?
+    private var lastVolume: (device: UInt32, requested: Int, reported: Float)?
 
     init(output: any AudioOutputSystem, brightness: any BrightnessControlling,
          settle: @escaping @Sendable () -> Void = { usleep(30_000) }) {
@@ -63,18 +67,13 @@ struct LevelKeyEngine: Sendable {
 
     private mutating func decide(_ key: LevelKey, modifiers: LevelKeyModifiers, pointer: CGPoint) -> LevelKeyDecision {
         guard !modifiers.belongsToSystem else { return .pass }
-        let step = modifiers.isFine ? Self.fineStep : Self.standardStep
         switch key {
-        case .volumeUp: return adjustVolume(direction: 1, step: step)
-        case .volumeDown: return adjustVolume(direction: -1, step: step)
+        case .volumeUp: return adjustVolume(direction: 1, fine: modifiers.isFine)
+        case .volumeDown: return adjustVolume(direction: -1, fine: modifiers.isFine)
         case .mute: return toggleMute()
-        case .brightnessUp: return adjustBrightness(direction: 1, step: step, pointer: pointer)
-        case .brightnessDown: return adjustBrightness(direction: -1, step: step, pointer: pointer)
+        case .brightnessUp: return adjustBrightness(direction: 1, fine: modifiers.isFine, pointer: pointer)
+        case .brightnessDown: return adjustBrightness(direction: -1, fine: modifiers.isFine, pointer: pointer)
         }
-    }
-
-    private static func next(from value: Float, direction: Float, step: Float) -> Float {
-        (((value / step).rounded() + direction) * step).clamped(to: 0...1)
     }
 
     // MARK: - Volume
@@ -86,26 +85,34 @@ struct LevelKeyEngine: Sendable {
         return state
     }
 
-    private mutating func adjustVolume(direction: Float, step: Float) -> LevelKeyDecision {
+    /// Steps on a grid of whole percentage points: a level between grid points moves to the next
+    /// one in the key's direction, so 43% goes to 45% or 40% with 5% steps.
+    private mutating func adjustVolume(direction: Int, fine: Bool) -> LevelKeyDecision {
         guard let state = controllableOutput(), let current = state.volume else { return .pass }
         let device = state.device.id
+        let step = fine ? Self.finePoints : policy.volumeStep.points
 
-        var base = current
+        var base = Self.percentage(current)
         if let last = lastVolume, last.device == device, abs(last.reported - current) <= Self.tolerance {
             base = last.requested
         }
-        let target = Self.next(from: base, direction: direction, step: step)
+        var target = VolumeStep.next(from: base, direction: direction, step: step)
 
         if state.effectivelyMuted, target > 0, state.canMute, !output.setMuted(false, device: device) {
             return rejectOutput(device)
         }
 
         var reported = current
-        if abs(target - current) > Self.tolerance {
-            guard output.setVolume(target, device: device),
-                  let confirmed = confirmVolume(device: device, from: current, target: target) else {
-                return rejectOutput(device)
+        if abs(Self.level(target) - current) > Self.tolerance {
+            var confirmed: Float?
+            for _ in 0...Self.coarseRetries {
+                guard output.setVolume(Self.level(target), device: device) else { return rejectOutput(device) }
+                confirmed = confirmVolume(device: device, from: current, target: Self.level(target))
+                let further = VolumeStep.next(from: target, direction: direction, step: step)
+                guard confirmed == nil, further != target else { break }
+                target = further
             }
+            guard let confirmed else { return rejectOutput(device) }
             reported = confirmed
         }
         lastVolume = (device, target, reported)
@@ -152,10 +159,12 @@ struct LevelKeyEngine: Sendable {
 
     // MARK: - Brightness
 
-    private mutating func adjustBrightness(direction: Float, step: Float, pointer: CGPoint) -> LevelKeyDecision {
+    /// The same whole-point grid as volume: 43% goes to 45% or 40% with 5% steps.
+    private mutating func adjustBrightness(direction: Int, fine: Bool, pointer: CGPoint) -> LevelKeyDecision {
         guard policy.brightness, !brightnessRejected, brightness.canControl(pointer: pointer) else { return .pass }
         guard let current = brightness.read() else { return rejectBrightness() }
-        let target = Self.next(from: current, direction: direction, step: step)
+        let step = fine ? Self.finePoints : policy.brightnessStep.points
+        let target = Self.level(VolumeStep.next(from: Self.percentage(current), direction: direction, step: step))
 
         guard abs(target - current) > Self.tolerance else {
             return .consume(.brightness(percentage: Self.percentage(current), increased: direction > 0))
@@ -178,5 +187,9 @@ struct LevelKeyEngine: Sendable {
 
     private static func percentage(_ value: Float) -> Int {
         Int((value * 100).rounded())
+    }
+
+    private static func level(_ percentage: Int) -> Float {
+        Float(percentage) / 100
     }
 }

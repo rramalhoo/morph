@@ -35,6 +35,11 @@
 			path = MorphTests;
 			sourceTree = "<group>";
 		};
+		A10000000000000000000042 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +65,7 @@
 			children = (
 				A10000000000000000000040 /* Morph */,
 				A10000000000000000000041 /* MorphTests */,
+				A10000000000000000000042 /* Shared */,
 				A10000000000000000000003 /* Config */,
 				A10000000000000000000004 /* Products */,
 			);
@@ -101,6 +107,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A10000000000000000000040 /* Morph */,
+				A10000000000000000000042 /* Shared */,
 			);
 			name = Morph;
 			productName = Morph;

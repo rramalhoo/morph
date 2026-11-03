@@ -9,10 +9,18 @@ enum ActivityPriority: Int, Comparable, Sendable {
     case normal
     /// Sent by another app through the local API. The API can't ask for anything above this.
     case liveActivity
+    /// A download or upload in progress. Above other apps' activities, below anything timed.
+    case transfer
+    /// A transfer just ended. Worth a moment more than one still running.
+    case transferDone
     /// From here up, an activity may appear while the user is hovering.
     case timer
     case device
+    /// The greeting after an unlock. Below anything the user is doing.
+    case welcome
     case screenshot
+    /// Something arriving or leaving with AirDrop.
+    case airDrop
     /// Volume and brightness: direct feedback for something the user just did.
     case level
     /// The answer to a gesture or a command.
@@ -33,6 +41,10 @@ enum ActivityPresentation: Equatable, Sendable {
     case level
     /// A captured image with actions.
     case screenshot
+    /// The greeting after an unlock.
+    case welcome
+    /// A download, upload or AirDrop with its progress.
+    case transfer
 }
 
 enum ActivityDismissal: Equatable, Sendable {
@@ -72,6 +84,11 @@ struct IslandActivity: Identifiable, Equatable, Sendable {
         case focusFinished(FocusPhase)
         case peripheralLow(name: String, percentage: Int)
         case external(ExternalActivity)
+        case welcome(WelcomeContent)
+        /// The transfer most worth showing, and how many others are running.
+        case transfer(Transfer, others: Int)
+        /// From a paired iPhone. With `hidesDetails`, only the service is named.
+        case continuity(ContinuityActivity, hidesDetails: Bool)
     }
 
     let id: UUID
@@ -155,6 +172,26 @@ struct IslandActivity: Identifiable, Equatable, Sendable {
             (priority, presentation, duration) = (.liveActivity, .banner, .seconds(3))
             (dismissal, dedupeKey) = (.automatic, "external-\(activity.id)")
             (resumesAfterInterruption, maximumWait) = (false, .seconds(10))
+        case .transfer(let transfer, _):
+            // One shared key: many transfers update one activity rather than taking turns.
+            (presentation, dedupeKey) = (.transfer, "transfers")
+            if transfer.isOver {
+                (priority, duration, dismissal) = (transfer.kind.isAirDrop ? .airDrop : .transferDone, .seconds(4), .automatic)
+                (resumesAfterInterruption, maximumWait) = (true, .seconds(10))
+            } else {
+                // Updates keep it up. If they stop, it steps aside; the panel still has it.
+                (priority, duration, dismissal) = (transfer.kind.isAirDrop ? .airDrop : .transfer, .seconds(8), .automatic)
+                (resumesAfterInterruption, maximumWait) = (true, .seconds(10))
+            }
+        case .continuity(let activity, _):
+            (priority, presentation, duration) = (.liveActivity, .banner, .seconds(4))
+            (dismissal, dedupeKey) = (.automatic, "continuity-\(activity.id)")
+            (resumesAfterInterruption, maximumWait) = (false, .seconds(10))
+        case .welcome:
+            // Late is pointless, and once interrupted the moment has passed.
+            (priority, presentation, duration) = (.welcome, .welcome, .seconds(3.5))
+            (dismissal, dedupeKey) = (.automatic, "welcome")
+            (resumesAfterInterruption, maximumWait) = (false, .seconds(2))
         }
     }
 }
@@ -181,6 +218,9 @@ extension IslandActivity.Content {
         case .focusFinished(let phase): phase.symbol
         case .peripheralLow: "battery.25percent"
         case .external(let activity): activity.symbol
+        case .welcome: "lock.open.fill"
+        case .transfer(let transfer, _): transfer.kind.isAirDrop ? "airdrop" : transfer.symbol
+        case .continuity(let activity, _): activity.symbol
         }
     }
 
@@ -205,6 +245,9 @@ extension IslandActivity.Content {
         case .focusFinished(let phase): "\(phase.title) finished"
         case .peripheralLow(let name, _): "\(name) battery low"
         case .external(let activity): activity.title
+        case .welcome(let welcome): welcome.greeting.text()
+        case .transfer(let transfer, _): transfer.name
+        case .continuity(let activity, let hides): hides && activity.payload.sensitive ? activity.payload.service : activity.payload.title
         }
     }
 
@@ -228,6 +271,17 @@ extension IslandActivity.Content {
         case .focusFinished(let phase): phase == .focus ? "Time for a break" : "Ready to focus"
         case .peripheralLow(_, let percentage): "\(percentage)% remaining"
         case .external(let activity): activity.subtitle
+        case .welcome(let welcome): welcome.date.formatted(date: .omitted, time: .shortened)
+        case .transfer(let transfer, _): transfer.detail
+        case .continuity(let activity, let hides):
+            switch activity.payload.state {
+            case .success: "Done"
+            case .failed: "Didn't complete"
+            case .paused: "Paused"
+            case .running:
+                hides && activity.payload.sensitive ? "From \(activity.deviceName)"
+                    : activity.payload.subtitle ?? activity.payload.endsAt.map { "Ends \($0.formatted(date: .omitted, time: .shortened))" }
+            }
         }
     }
 }
@@ -273,8 +327,18 @@ extension IslandActivity.Content {
     /// Feedback for an action in progress isn't history.
     var appearsInRecent: Bool {
         switch self {
-        case .volumeChanged, .outputVolume, .brightness, .trackSkipped, .screenshot: false
+        case .transfer(let transfer, _): transfer.isOver
+        case .volumeChanged, .outputVolume, .brightness, .trackSkipped, .screenshot, .welcome: false
         default: true
+        }
+    }
+
+    /// Content that shouldn't wait out a lock: images, other apps' data, what's playing, and
+    /// anything that names files.
+    var isPrivate: Bool {
+        switch self {
+        case .screenshot, .external, .nowPlaying, .trackSkipped, .filesAdded, .welcome, .transfer, .continuity: true
+        default: false
         }
     }
 

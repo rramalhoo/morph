@@ -14,6 +14,8 @@ final class MorphPreferences {
     nonisolated static let liveAPIPortRange: ClosedRange<Int> = 1024...65535
     nonisolated static let defaultLiveAPIPort = 47_800
     nonisolated static let deviceRefreshRange: ClosedRange<Int> = 1...30
+    nonisolated static let welcomeDurationRange: ClosedRange<Double> = 2.0...6.0
+    nonisolated static let defaultWelcomeDuration = 3.5
 
     private enum Key: String, CaseIterable {
         case isEnabled, showMenuBarIcon, showDockIcon
@@ -27,14 +29,20 @@ final class MorphPreferences {
         case deviceActivities, peripheralBattery
         case horizontalSwipes, verticalSwipes, gestureSensitivity
         case volumeIndicator, brightnessIndicator, activityDuration
-        case replaceVolumeHUD, volumeShowsPercentage, volumeHUDDuration
-        case replaceBrightnessHUD, brightnessShowsPercentage, brightnessHUDDuration
+        case replaceVolumeHUD, volumeShowsPercentage, volumeHUDDuration, volumeStep
+        case replaceBrightnessHUD, brightnessShowsPercentage, brightnessHUDDuration, brightnessStep
         case waveDiagnostics, nowPlayingPro, progressControls
         case screenshotPreviews, screenshotFolder, screenshotDuration
         case liveAPIEnabled, liveAPIPort
         case focusEnabled, focusMinutes, shortBreakMinutes, longBreakMinutes, focusCycles
         case focusNotifications, focusAutoBreak
         case batteryAudioDevices, peripheralAlerts, deviceRefreshMinutes
+        case lockScreenEnabled, lockAnimation, welcomeEnabled, welcomeShowsMusic, welcomeShowsBattery
+        case welcomeDuration, welcomeReducedMotion
+        case notificationsEnabled, notificationPreviews, lowBatteryNotifications
+        case transfersEnabled, showDownloads, showUploads, showAirDrop, monitorDownloads, downloadsFolder
+        case transferCompletionAnimation, transferHistoryMinutes
+        case continuityEnabled, showContinuityActivities, continuityHidesSensitive
     }
 
     // General
@@ -78,12 +86,15 @@ final class MorphPreferences {
     var peripheralBattery = true { didSet { store(peripheralBattery, .peripheralBattery) } }
     var volumeIndicator = true { didSet { store(volumeIndicator, .volumeIndicator) } }
     var brightnessIndicator = true { didSet { store(brightnessIndicator, .brightnessIndicator) } }
-    var replaceVolumeHUD = false { didSet { store(replaceVolumeHUD, .replaceVolumeHUD) } }
+    /// On by default so the keys move in exact steps; without permission macOS keeps them.
+    var replaceVolumeHUD = true { didSet { store(replaceVolumeHUD, .replaceVolumeHUD) } }
     var volumeShowsPercentage = true { didSet { store(volumeShowsPercentage, .volumeShowsPercentage) } }
     var volumeHUDDuration = MorphPreferences.defaultHUDDuration { didSet { store(volumeHUDDuration, .volumeHUDDuration) } }
+    var volumeStep = VolumeStep.five { didSet { store(volumeStep.rawValue, .volumeStep) } }
     var replaceBrightnessHUD = false { didSet { store(replaceBrightnessHUD, .replaceBrightnessHUD) } }
     var brightnessShowsPercentage = true { didSet { store(brightnessShowsPercentage, .brightnessShowsPercentage) } }
     var brightnessHUDDuration = MorphPreferences.defaultHUDDuration { didSet { store(brightnessHUDDuration, .brightnessHUDDuration) } }
+    var brightnessStep = VolumeStep.five { didSet { store(brightnessStep.rawValue, .brightnessStep) } }
 
     var waveDiagnostics = false { didSet { store(waveDiagnostics, .waveDiagnostics) } }
     var nowPlayingPro = true { didSet { store(nowPlayingPro, .nowPlayingPro) } }
@@ -109,6 +120,43 @@ final class MorphPreferences {
     var batteryAudioDevices = true { didSet { store(batteryAudioDevices, .batteryAudioDevices) } }
     var peripheralAlerts = false { didSet { store(peripheralAlerts, .peripheralAlerts) } }
     var deviceRefreshMinutes = 5 { didSet { store(deviceRefreshMinutes, .deviceRefreshMinutes) } }
+
+    // Lock Screen
+    var lockScreenEnabled = true { didSet { store(lockScreenEnabled, .lockScreenEnabled) } }
+    var lockAnimation = true { didSet { store(lockAnimation, .lockAnimation) } }
+    var welcomeEnabled = true { didSet { store(welcomeEnabled, .welcomeEnabled) } }
+    var welcomeShowsMusic = true { didSet { store(welcomeShowsMusic, .welcomeShowsMusic) } }
+    var welcomeShowsBattery = true { didSet { store(welcomeShowsBattery, .welcomeShowsBattery) } }
+    var welcomeDuration = MorphPreferences.defaultWelcomeDuration { didSet { store(welcomeDuration, .welcomeDuration) } }
+    var welcomeReducedMotion = false { didSet { store(welcomeReducedMotion, .welcomeReducedMotion) } }
+
+    // Notifications. Each kind still has its own switch; this one can silence them all.
+    var notificationsEnabled = true { didSet { store(notificationsEnabled, .notificationsEnabled) } }
+    /// Off: notifications say what happened, never which file, device or activity.
+    var notificationPreviews = false { didSet { store(notificationPreviews, .notificationPreviews) } }
+    var lowBatteryNotifications = false { didSet { store(lowBatteryNotifications, .lowBatteryNotifications) } }
+
+    // Transfers. Downloads are only watched in a folder the user picks.
+    var transfersEnabled = true { didSet { store(transfersEnabled, .transfersEnabled) } }
+    var showDownloads = true { didSet { store(showDownloads, .showDownloads) } }
+    var showUploads = true { didSet { store(showUploads, .showUploads) } }
+    var showAirDrop = true { didSet { store(showAirDrop, .showAirDrop) } }
+    var monitorDownloads = false { didSet { store(monitorDownloads, .monitorDownloads) } }
+    /// A security-scoped bookmark of the downloads folder.
+    var downloadsFolder: Data? {
+        didSet {
+            guard !isLoading else { return }
+            defaults.set(downloadsFolder, forKey: Key.downloadsFolder.rawValue)
+        }
+    }
+    var transferCompletionAnimation = true { didSet { store(transferCompletionAnimation, .transferCompletionAnimation) } }
+    /// How long finished transfers stay in the panel. Never written to disk.
+    var transferHistoryMinutes = 15 { didSet { store(transferHistoryMinutes, .transferHistoryMinutes) } }
+
+    // Continuity. Off until the user pairs something.
+    var continuityEnabled = false { didSet { store(continuityEnabled, .continuityEnabled) } }
+    var showContinuityActivities = true { didSet { store(showContinuityActivities, .showContinuityActivities) } }
+    var continuityHidesSensitive = true { didSet { store(continuityHidesSensitive, .continuityHidesSensitive) } }
 
     // Advanced
     var selectedDisplay = MorphPreferences.automaticDisplay { didSet { store(selectedDisplay, .selectedDisplay) } }
@@ -170,12 +218,14 @@ final class MorphPreferences {
         peripheralBattery = bool(.peripheralBattery, default: true)
         volumeIndicator = bool(.volumeIndicator, default: true)
         brightnessIndicator = bool(.brightnessIndicator, default: true)
-        replaceVolumeHUD = bool(.replaceVolumeHUD, default: false)
+        replaceVolumeHUD = bool(.replaceVolumeHUD, default: true)
         volumeShowsPercentage = bool(.volumeShowsPercentage, default: true)
         volumeHUDDuration = hudDuration(.volumeHUDDuration)
+        volumeStep = option(.volumeStep, default: .five)
         replaceBrightnessHUD = bool(.replaceBrightnessHUD, default: false)
         brightnessShowsPercentage = bool(.brightnessShowsPercentage, default: true)
         brightnessHUDDuration = hudDuration(.brightnessHUDDuration)
+        brightnessStep = option(.brightnessStep, default: .five)
         waveDiagnostics = bool(.waveDiagnostics, default: false)
         nowPlayingPro = bool(.nowPlayingPro, default: true)
         progressControls = bool(.progressControls, default: true)
@@ -194,6 +244,28 @@ final class MorphPreferences {
         batteryAudioDevices = bool(.batteryAudioDevices, default: true)
         peripheralAlerts = bool(.peripheralAlerts, default: false)
         deviceRefreshMinutes = (defaults.object(forKey: Key.deviceRefreshMinutes.rawValue) as? Int ?? 5).clamped(to: Self.deviceRefreshRange)
+        lockScreenEnabled = bool(.lockScreenEnabled, default: true)
+        lockAnimation = bool(.lockAnimation, default: true)
+        welcomeEnabled = bool(.welcomeEnabled, default: true)
+        welcomeShowsMusic = bool(.welcomeShowsMusic, default: true)
+        welcomeShowsBattery = bool(.welcomeShowsBattery, default: true)
+        welcomeDuration = (defaults.object(forKey: Key.welcomeDuration.rawValue) as? Double ?? Self.defaultWelcomeDuration)
+            .clamped(to: Self.welcomeDurationRange)
+        welcomeReducedMotion = bool(.welcomeReducedMotion, default: false)
+        notificationsEnabled = bool(.notificationsEnabled, default: true)
+        notificationPreviews = bool(.notificationPreviews, default: false)
+        lowBatteryNotifications = bool(.lowBatteryNotifications, default: false)
+        transfersEnabled = bool(.transfersEnabled, default: true)
+        showDownloads = bool(.showDownloads, default: true)
+        showUploads = bool(.showUploads, default: true)
+        showAirDrop = bool(.showAirDrop, default: true)
+        monitorDownloads = bool(.monitorDownloads, default: false)
+        downloadsFolder = defaults.data(forKey: Key.downloadsFolder.rawValue)
+        transferCompletionAnimation = bool(.transferCompletionAnimation, default: true)
+        transferHistoryMinutes = (defaults.object(forKey: Key.transferHistoryMinutes.rawValue) as? Int ?? 15).clamped(to: 0...240)
+        continuityEnabled = bool(.continuityEnabled, default: false)
+        showContinuityActivities = bool(.showContinuityActivities, default: true)
+        continuityHidesSensitive = bool(.continuityHidesSensitive, default: true)
         selectedDisplay = defaults.string(forKey: Key.selectedDisplay.rawValue) ?? Self.automaticDisplay
         calibration = json(.calibration) ?? .zero
         quickActions = json(.quickActions) ?? QuickAction.defaults
@@ -237,7 +309,8 @@ extension MorphPreferences {
     func levelKeyPolicy(canShow: Bool) -> LevelKeyPolicy {
         let willShow = canShow && activitiesEnabled
         return LevelKeyPolicy(volume: willShow && volumeIndicator && replaceVolumeHUD,
-                              brightness: willShow && brightnessIndicator && replaceBrightnessHUD)
+                              brightness: willShow && brightnessIndicator && replaceBrightnessHUD,
+                              volumeStep: volumeStep, brightnessStep: brightnessStep)
     }
 }
 

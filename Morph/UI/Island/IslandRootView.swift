@@ -13,7 +13,15 @@ struct IslandRootView: View {
 
     @Namespace private var artworkSpace
 
-    private var motion: MorphMotion { MorphMotion.resolve(preferences, systemReduced: systemReduceMotion) }
+    private var motion: MorphMotion {
+        var motion = MorphMotion.resolve(preferences, systemReduced: systemReduceMotion)
+        // The welcome has its own switch, for those who like the greeting but not the movement.
+        if preferences.welcomeReducedMotion, case .activity(let activity) = island.presentation,
+           activity.presentation == .welcome {
+            motion.reduced = true
+        }
+        return motion
+    }
 
     var body: some View {
         let presentation = island.presentation
@@ -81,6 +89,8 @@ extension IslandPresentation {
         case .hover: "hover"
         case .dropTarget: "drop"
         // Volume and brightness share one view, so moving between them never rebuilds it.
+        // Transfers update in place, so the bar moves instead of the content crossfading.
+        case .activity(let activity) where activity.presentation == .transfer: "transfer"
         case .activity(let activity): activity.presentation == .level ? "level" : "activity-\(activity.id)"
         case .expanded: "expanded"
         }
@@ -109,7 +119,13 @@ private struct IslandContentView: View {
         case .activity(let activity) where activity.presentation == .screenshot:
             ScreenshotPreviewView(notch: notch, inset: inset)
         case .activity(let activity):
-            ActivityView(activity: activity, notch: notch, inset: inset)
+            if case .welcome(let welcome) = activity.content {
+                WelcomeIslandView(welcome: welcome, duration: activity.duration, notch: notch)
+            } else if case .transfer(let transfer, let others) = activity.content {
+                TransferIslandView(transfer: transfer, others: others, notch: notch)
+            } else {
+                ActivityView(activity: activity, notch: notch, inset: inset)
+            }
         case .expanded(let tab):
             ExpandedPanelView(tab: tab, notch: notch, inset: inset, artworkSpace: artworkSpace)
         }

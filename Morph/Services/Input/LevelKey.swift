@@ -41,7 +41,7 @@ struct LevelKeyModifiers: Equatable, Sendable {
 
     static let none = LevelKeyModifiers()
 
-    /// Shift and Option together means quarter steps.
+    /// Shift and Option together means fine steps.
     var isFine: Bool { shift && option }
     /// Option alone opens the Sound or Displays settings.
     var belongsToSystem: Bool { commandOrControl || (option && !shift) }
@@ -51,6 +51,8 @@ struct LevelKeyModifiers: Equatable, Sendable {
 struct LevelKeyPolicy: Equatable, Sendable {
     var volume = false
     var brightness = false
+    var volumeStep = VolumeStep.five
+    var brightnessStep = VolumeStep.five
 
     static let off = LevelKeyPolicy()
 

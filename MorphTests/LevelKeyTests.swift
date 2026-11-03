@@ -117,7 +117,6 @@ private final class ControlledPermission: AccessibilityPermission, @unchecked Se
     func request() { requestCount += 1 }
 }
 
-private let step = LevelKeyEngine.standardStep
 
 @Suite struct LevelKeyParsingTests {
     private func event(key: Int, state: Int) -> Int { key << 16 | state << 8 }
@@ -164,32 +163,103 @@ private let step = LevelKeyEngine.standardStep
         engine.handle(LevelKeyPress(key: key), modifiers: modifiers, pointer: .zero)
     }
 
+    private func percentage(_ decision: LevelKeyDecision) -> Int? {
+        guard case .consume(.volume(let percentage, _)?) = decision else { return nil }
+        return percentage
+    }
+
     @Test func volumeUpChangesTheRealValueBeforeConsuming() {
         let output = ControlledOutput(volume: 0.5)
         var subject = engine(output)
-        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)))
-        #expect(output.state?.volume == 0.5 + step)
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 55, muted: false)))
+        #expect(output.state?.volume == 0.55)
     }
 
     @Test func volumeDownChangesTheRealValueBeforeConsuming() {
         let output = ControlledOutput(volume: 0.5)
         var subject = engine(output)
-        #expect(press(&subject, .volumeDown) == .consume(.volume(percentage: 44, muted: false)))
-        #expect(output.state?.volume == 0.5 - step)
+        #expect(press(&subject, .volumeDown) == .consume(.volume(percentage: 45, muted: false)))
+        #expect(output.state?.volume == 0.45)
     }
 
-    @Test func stepsLandOnTheSameGridAsTheSystem() {
-        let output = ControlledOutput(volume: 0.44)
+    @Test func everyPressUpWalksTheFivePercentGrid() {
+        let output = ControlledOutput(volume: 0, muted: true)
+        var subject = engine(output)
+        let shown = (0..<20).map { _ in percentage(press(&subject, .volumeUp)) }
+        #expect(shown == Array(stride(from: 5, through: 100, by: 5)))
+        #expect(output.state?.volume == 1)
+        #expect(output.state?.isMuted == false)
+    }
+
+    @Test func everyPressDownWalksTheFivePercentGrid() {
+        let output = ControlledOutput(volume: 1)
+        var subject = engine(output)
+        let shown = (0..<20).map { _ in percentage(press(&subject, .volumeDown)) }
+        #expect(shown == Array(stride(from: 95, through: 0, by: -5)))
+        #expect(output.state?.volume == 0)
+    }
+
+    @Test func aLevelBetweenStepsMovesToTheNextOneInThatDirection() {
+        for (start, key, expected) in [(0.43, LevelKey.volumeUp, 45), (0.43, .volumeDown, 40),
+                                       (0.5, .volumeUp, 55), (0.5, .volumeDown, 45),
+                                       (0.01, .volumeDown, 0), (0.99, .volumeUp, 100), (0.97, .volumeDown, 95)] {
+            let output = ControlledOutput(volume: Float(start))
+            var subject = engine(output)
+            #expect(percentage(press(&subject, key)) == expected, "\(start) \(key)")
+            #expect(output.state?.volume == Float(expected) / 100)
+        }
+    }
+
+    @Test func theStepFollowsThePolicy() {
+        for (step, up, down) in [(VolumeStep.two, 44, 40), (.five, 45, 40), (.ten, 50, 40)] {
+            let output = ControlledOutput(volume: 0.42)
+            var subject = engine(output, policy: LevelKeyPolicy(volume: true, volumeStep: step))
+            #expect(percentage(press(&subject, .volumeUp)) == up, "\(step)")
+            output.state?.volume = 0.42
+            #expect(percentage(press(&subject, .volumeDown)) == down, "\(step)")
+        }
+    }
+
+    @Test func aStepChangeTakesEffectOnTheNextPress() {
+        let output = ControlledOutput(volume: 0.5)
         var subject = engine(output)
         _ = press(&subject, .volumeUp)
-        #expect(output.state?.volume == 0.5)
+        subject.policy.volumeStep = .ten
+        #expect(percentage(press(&subject, .volumeUp)) == 60)
+        subject.policy.volumeStep = .two
+        #expect(percentage(press(&subject, .volumeUp)) == 62)
     }
 
     @Test func fineStepsWithShiftAndOption() {
         let output = ControlledOutput(volume: 0.5)
         var subject = engine(output)
         _ = press(&subject, .volumeUp, LevelKeyModifiers(shift: true, option: true))
-        #expect(output.state?.volume == 0.5 + LevelKeyEngine.fineStep)
+        #expect(output.state?.volume == 0.51)
+    }
+
+    @Test func brightnessMovesOnTheConfiguredGrid() {
+        for (step, up, down) in [(VolumeStep.two, 44, 42), (.five, 45, 40), (.ten, 50, 40)] {
+            let brightness = ControlledBrightness(0.43)
+            var subject = engine(ControlledOutput(volume: 0.5), brightness,
+                                 policy: LevelKeyPolicy(brightness: true, brightnessStep: step))
+            #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: up, increased: true)))
+            brightness.value = 0.43
+            #expect(press(&subject, .brightnessDown) == .consume(.brightness(percentage: down, increased: false)))
+        }
+        let brightness = ControlledBrightness(0.5)
+        var fine = engine(ControlledOutput(volume: 0.5), brightness)
+        #expect(press(&fine, .brightnessUp, LevelKeyModifiers(shift: true, option: true))
+                == .consume(.brightness(percentage: 51, increased: true)))
+    }
+
+    @MainActor @Test func theBrightnessStepPersistsAndReachesThePolicy() {
+        let defaults = makeDefaults()
+        let preferences = MorphPreferences(defaults: defaults)
+        #expect(preferences.brightnessStep == .five)
+        preferences.brightnessStep = .ten
+        let reloaded = MorphPreferences(defaults: defaults)
+        #expect(reloaded.brightnessStep == .ten)
+        #expect(reloaded.levelKeyPolicy(canShow: true).brightnessStep == .ten)
     }
 
     @Test func muteTogglesBothWaysAndKeepsTheLevel() {
@@ -204,11 +274,17 @@ private let step = LevelKeyEngine.standardStep
     @Test func raisingTheVolumeUnmutes() {
         let output = ControlledOutput(volume: 0.5, muted: true)
         var subject = engine(output)
-        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)))
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 55, muted: false)))
+    }
+
+    @Test func loweringAlsoUnmutesAsTheSystemDoes() {
+        let output = ControlledOutput(volume: 0.5, muted: true)
+        var subject = engine(output)
+        #expect(press(&subject, .volumeDown) == .consume(.volume(percentage: 45, muted: false)))
     }
 
     @Test func reachingZeroMutes() {
-        let output = ControlledOutput(volume: step)
+        let output = ControlledOutput(volume: 0.05)
         var subject = engine(output)
         #expect(press(&subject, .volumeDown) == .consume(.volume(percentage: 0, muted: true)))
         #expect(output.state?.isMuted == true)
@@ -233,22 +309,42 @@ private let step = LevelKeyEngine.standardStep
         var subject = engine(output)
         let results = (0..<10).map { _ in press(&subject, .volumeUp) }
         #expect(results.allSatisfy { if case .consume = $0 { true } else { false } })
-        #expect(output.state?.volume == 0.25 + 10 * step)
+        #expect(output.state?.volume == 0.75)
+    }
+
+    @Test func rapidAlternatingPressesNeverDrift() {
+        let output = ControlledOutput(volume: 0.5)
+        var subject = engine(output)
+        for _ in 0..<50 {
+            _ = press(&subject, .volumeUp)
+            _ = press(&subject, .volumeDown)
+        }
+        #expect(output.state?.volume == 0.5)
     }
 
     @Test func aQuantizingDeviceStillStepsEvenly() {
         let output = ControlledOutput(volume: 0.5)
-        output.quantize = { ($0 * 20).rounded(.down) / 20 }
+        output.quantize = { ($0 * 64).rounded(.down) / 64 }
         var subject = engine(output)
-        for _ in 0..<4 { _ = press(&subject, .volumeUp) }
-        #expect(output.state?.volume == 0.75, "Stepping from read-backs alone would fall behind")
+        let shown = (0..<4).map { _ in percentage(press(&subject, .volumeUp)) }
+        #expect(shown == [55, 59, 64, 69], "The HUD shows what the device really did")
+        #expect(output.state?.volume == 44.0 / 64)
+    }
+
+    @Test func aDeviceCoarserThanTheStepMovesToItsNextLevel() {
+        let output = ControlledOutput(volume: 0.5)
+        output.quantize = { ($0 * 16).rounded() / 16 }
+        var subject = engine(output, policy: LevelKeyPolicy(volume: true, volumeStep: .two))
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)),
+                "The HUD shows what the device really did")
+        #expect(output.state?.volume == 0.5625)
     }
 
     @Test func aSlowDriverIsGivenAMoment() {
         let output = ControlledOutput(volume: 0.5)
         output.readsBeforeLanding = 1
         var subject = engine(output)
-        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)))
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 55, muted: false)))
     }
 
     @Test func anExternalChangeIsFollowed() {
@@ -257,7 +353,18 @@ private let step = LevelKeyEngine.standardStep
         _ = press(&subject, .volumeUp)
         output.state?.volume = 0.25
         _ = press(&subject, .volumeUp)
-        #expect(output.state?.volume == 0.25 + step)
+        #expect(output.state?.volume == 0.3)
+        output.state?.volume = 0.43
+        _ = press(&subject, .volumeDown)
+        #expect(output.state?.volume == 0.4, "An off-grid level set elsewhere joins the grid")
+    }
+
+    @Test func anExternalMuteIsRespected() {
+        let output = ControlledOutput(volume: 0.5)
+        var subject = engine(output)
+        output.state?.isMuted = true
+        #expect(press(&subject, .mute) == .consume(.volume(percentage: 50, muted: false)))
+        #expect(output.state?.volume == 0.5)
     }
 
     // MARK: - Falling back
@@ -294,7 +401,7 @@ private let step = LevelKeyEngine.standardStep
         output.rejectsWrites = false
         #expect(press(&subject, .volumeUp) == .pass)
         subject.clearOutputRejection()
-        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)))
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 55, muted: false)))
     }
 
     @Test func aRejectionOnlyCoversThatDevice() {
@@ -304,7 +411,17 @@ private let step = LevelKeyEngine.standardStep
         _ = press(&subject, .volumeUp)
         output.rejectsWrites = false
         output.state?.device = AudioOutputDevice(id: 2, uid: "2", name: "AirPods", transport: .bluetooth)
-        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 56, muted: false)))
+        #expect(press(&subject, .volumeUp) == .consume(.volume(percentage: 55, muted: false)))
+    }
+
+    @Test func aNewDeviceStepsFromItsOwnLevel() {
+        let output = ControlledOutput(volume: 0.5, id: 1)
+        var subject = engine(output)
+        _ = press(&subject, .volumeUp)
+        output.state = OutputState(device: AudioOutputDevice(id: 2, uid: "2", name: "AirPods", transport: .bluetooth),
+                                   volume: 0.32, isMuted: false, canSetVolume: true, canMute: true)
+        #expect(percentage(press(&subject, .volumeUp)) == 35)
+        #expect(percentage(press(&subject, .volumeDown)) == 30)
     }
 
     @Test func anOutputWithoutSoftwareVolumeStaysWithMacOS() {
@@ -363,7 +480,7 @@ private let step = LevelKeyEngine.standardStep
     @Test func brightnessUpAndDownChangeTheRealValue() {
         let brightness = ControlledBrightness(0.5)
         var subject = engine(ControlledOutput(volume: 0.5), brightness)
-        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 56, increased: true)))
+        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 55, increased: true)))
         #expect(press(&subject, .brightnessDown) == .consume(.brightness(percentage: 50, increased: false)))
         #expect(brightness.value == 0.5)
     }
@@ -403,7 +520,7 @@ private let step = LevelKeyEngine.standardStep
         brightness.rejectsWrites = false
         #expect(press(&subject, .brightnessUp) == .pass)
         subject.clearBrightnessRejection()
-        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 56, increased: true)))
+        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 55, increased: true)))
     }
 
     @Test func anIgnoredBrightnessWriteReleasesTheKey() {
@@ -423,7 +540,7 @@ private let step = LevelKeyEngine.standardStep
         output.rejectsWrites = true
         var subject = engine(output, ControlledBrightness())
         _ = press(&subject, .volumeUp)
-        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 56, increased: true)))
+        #expect(press(&subject, .brightnessUp) == .consume(.brightness(percentage: 55, increased: true)))
     }
 }
 
@@ -547,7 +664,7 @@ private let step = LevelKeyEngine.standardStep
         subject.apply(both)
         #expect(tap.press(.volumeUp))
         await waitUntil { !updates.isEmpty }
-        #expect(updates == [.volume(percentage: 56, muted: false)])
+        #expect(updates == [.volume(percentage: 55, muted: false)])
     }
 
     @Test func alternatingKeysUpdateEachControlOnItsOwn() async {
@@ -560,8 +677,21 @@ private let step = LevelKeyEngine.standardStep
         tap.press(.volumeUp)
         tap.press(.brightnessDown)
         await waitUntil { updates.count == 4 }
-        #expect(updates == [.volume(percentage: 56, muted: false), .brightness(percentage: 56, increased: true),
-                            .volume(percentage: 63, muted: false), .brightness(percentage: 50, increased: false)])
+        #expect(updates == [.volume(percentage: 55, muted: false), .brightness(percentage: 55, increased: true),
+                            .volume(percentage: 60, muted: false), .brightness(percentage: 50, increased: false)])
+    }
+
+    @Test func theChosenStepReachesTheTap() async {
+        let (subject, _) = service()
+        var updates: [LevelUpdate] = []
+        subject.onUpdate = { update, _, _ in updates.append(update) }
+        subject.apply(LevelKeyPolicy(volume: true, volumeStep: .ten))
+        tap.press(.volumeUp)
+        subject.apply(LevelKeyPolicy(volume: true, volumeStep: .two))
+        tap.press(.volumeUp)
+        await waitUntil { updates.count == 2 }
+        #expect(updates == [.volume(percentage: 60, muted: false), .volume(percentage: 62, muted: false)])
+        #expect(tap.installCount == 1, "A step change doesn't reinstall the tap")
     }
 
     @Test func aRefusalIsReportedAndClearedByNewHardware() async {
@@ -586,6 +716,19 @@ private let step = LevelKeyEngine.standardStep
         display.supported = false
         subject.displaysDidChange()
         #expect(!subject.brightnessSupported)
+    }
+
+    @Test func aDefaultOnReplacementAsksForPermissionOnce() {
+        tap.accepts = false
+        let (subject, permission) = service(trusted: false)
+        subject.apply(LevelKeyPolicy(volume: true))
+        subject.apply(.off)
+        subject.apply(LevelKeyPolicy(volume: true))
+        #expect(permission.requestCount == 1)
+        tap.accepts = true
+        let (trusted, other) = service(trusted: true)
+        trusted.apply(LevelKeyPolicy(volume: true))
+        #expect(other.requestCount == 0)
     }
 
     @Test func thePromptAppearsOnlyWhenPermissionIsMissing() {
@@ -661,9 +804,17 @@ private var AXIsProcessTrustedForTests: Bool { SystemAccessibilityPermission().i
         return subject
     }
 
-    @Test func replacementIsOffUntilChosen() {
+    @Test func volumeReplacementIsOnByDefaultInFivePercentSteps() {
         let subject = MorphPreferences(defaults: makeDefaults())
-        #expect(subject.levelKeyPolicy(canShow: true) == .off)
+        #expect(subject.replaceVolumeHUD)
+        #expect(!subject.replaceBrightnessHUD, "Brightness uses a private interface, so it stays opt-in")
+        #expect(subject.levelKeyPolicy(canShow: true) == LevelKeyPolicy(volume: true, volumeStep: .five))
+    }
+
+    @Test func turningReplacementOffIsRemembered() {
+        let defaults = makeDefaults()
+        MorphPreferences(defaults: defaults).replaceVolumeHUD = false
+        #expect(MorphPreferences(defaults: defaults).levelKeyPolicy(canShow: true) == .off)
     }
 
     @Test func eachReplacementIsIndependent() {
@@ -694,6 +845,34 @@ private var AXIsProcessTrustedForTests: Bool { SystemAccessibilityPermission().i
         #expect(reloaded.brightnessHUDDuration == 2.4)
         #expect(reloaded.volumeHUDDuration == MorphPreferences.hudDurationRange.upperBound)
         #expect(reloaded.brightnessShowsPercentage)
+    }
+
+    @Test func theVolumeStepPersistsAndReachesThePolicy() {
+        let defaults = makeDefaults()
+        let subject = MorphPreferences(defaults: defaults)
+        #expect(subject.volumeStep == .five)
+        subject.replaceVolumeHUD = true
+        subject.volumeStep = .two
+        let reloaded = MorphPreferences(defaults: defaults)
+        #expect(reloaded.volumeStep == .two)
+        #expect(reloaded.levelKeyPolicy(canShow: true) == LevelKeyPolicy(volume: true, volumeStep: .two))
+        defaults.set("seven", forKey: "volumeStep")
+        #expect(MorphPreferences(defaults: defaults).volumeStep == .five, "An unknown value falls back")
+        reloaded.reset()
+        #expect(reloaded.volumeStep == .five)
+    }
+
+    @Test func gridArithmeticIsExact() {
+        for step in VolumeStep.allCases.map(\.points) {
+            for level in 0...100 {
+                let up = VolumeStep.next(from: level, direction: 1, step: step)
+                let down = VolumeStep.next(from: level, direction: -1, step: step)
+                #expect(up % step == 0 || up == 100)
+                #expect(down % step == 0)
+                #expect(level == 100 ? up == 100 : (up > level && up - level <= step))
+                #expect(level == 0 ? down == 0 : (down < level && level - down <= step))
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 import CoreGraphics
 
 enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
-    case home, timers, focus, battery, activities, shelf
+    case home, timers, focus, battery, activities, transfers, shelf
 
     var id: String { rawValue }
 
@@ -12,6 +12,7 @@ enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
         case .focus: "Focus"
         case .battery: "Battery"
         case .activities: "Activities"
+        case .transfers: "Transfers"
         case .shelf: "File Shelf"
         }
     }
@@ -23,6 +24,7 @@ enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
         case .focus: "brain.head.profile"
         case .battery: "battery.75percent"
         case .activities: "dot.radiowaves.left.and.right"
+        case .transfers: "arrow.up.arrow.down"
         case .shelf: "tray.full.fill"
         }
     }
@@ -35,6 +37,8 @@ enum LiveContent: Equatable, Sendable {
     case media
     case focus
     case external
+    /// An activity from a paired iPhone.
+    case continuity
 }
 
 enum IslandPresentation: Equatable, Sendable {
@@ -61,6 +65,10 @@ struct IslandLayout: Equatable, Sendable {
     /// brightness, or reaching mute, can't change the island's shape.
     static let levelRow: CGFloat = 26
     static let screenshotSize = CGSize(width: 420, height: 112)
+    /// One size for both phases of the welcome, so changing what it says never changes its shape.
+    static let welcomeSize = CGSize(width: 400, height: 64)
+    /// One row of text and a bar, wide enough that a long name and its speed both fit.
+    static let transferSize = CGSize(width: 400, height: 50)
 
     var notch: CGSize
     var size: IslandSizePreference
@@ -92,6 +100,10 @@ struct IslandLayout: Equatable, Sendable {
             case .level: result = CGSize(width: notch.width + 2 * Self.levelEar, height: notch.height + Self.levelRow)
             case .screenshot:
                 result = CGSize(width: max(notch.width + 200, Self.screenshotSize.width), height: notch.height + Self.screenshotSize.height)
+            case .welcome:
+                result = CGSize(width: max(notch.width + 220, Self.welcomeSize.width), height: notch.height + Self.welcomeSize.height)
+            case .transfer:
+                result = CGSize(width: max(notch.width + 200, Self.transferSize.width), height: notch.height + Self.transferSize.height)
             }
         case .expanded:
             result = expandedSize
@@ -118,6 +130,8 @@ struct IslandLayout: Equatable, Sendable {
             case .banner: Corners(top: 12, bottom: 22)
             case .level: Corners(top: 8, bottom: 16)
             case .screenshot: Corners(top: 12, bottom: 22)
+            case .welcome: Corners(top: 12, bottom: 24)
+            case .transfer: Corners(top: 12, bottom: 22)
             }
         case .expanded: Corners(top: 14, bottom: 26)
         }

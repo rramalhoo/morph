@@ -120,6 +120,10 @@ final class LiveAPIRouter {
     private var requests: TokenBucket
     private var failures: TokenBucket
 
+    /// Transfers reported through `/v1/transfers`. Absent, or switched off, the route doesn't exist.
+    var transfers: TransferManager?
+    var acceptsTransfers = false
+
     private(set) var handledCount = 0
     private(set) var rejectedCount = 0
 
@@ -173,9 +177,60 @@ final class LiveAPIRouter {
             default:
                 return .error(405, "Method not allowed")
             }
+        case ("transfers", let id):
+            guard acceptsTransfers, let transfers else { return .error(404, "Not found") }
+            return routeTransfer(request, id: id, in: transfers)
         default:
             return .error(404, "Not found")
         }
+    }
+
+    /// Scripts report; Morph shows. Morph never offers to cancel these, since it can't.
+    private func routeTransfer(_ request: HTTPRequest, id: String?, in transfers: TransferManager) -> HTTPResponse {
+        switch (request.method, id) {
+        case ("POST", nil):
+            return perform {
+                let payload = try TransferPayload(json: request.body)
+                guard let id = payload.id, let name = payload.name, let kind = payload.kind else {
+                    throw LiveActivityValidationError.invalid("id, name and kind are required")
+                }
+                let transfer = try transfers.begin(Transfer(id: "api-\(id)", kind: kind, name: name, source: .liveAPI,
+                                                            state: payload.state ?? .transferring, bytes: payload.bytes ?? 0,
+                                                            totalBytes: payload.total))
+                return .json(201, Self.describe(transfer))
+            }
+        case ("PATCH", let id?):
+            return perform {
+                let payload = try TransferPayload(json: request.body)
+                guard payload.id == nil || payload.id == id else { throw LiveActivityValidationError.invalid("id can't change") }
+                guard payload.kind == nil else { throw LiveActivityValidationError.invalid("kind can't change") }
+                let key = "api-\(id)"
+                guard transfers.transfer(id: key)?.source == .liveAPI else { throw TransferManager.Failure.notFound }
+                let transfer = if let state = payload.state, state.isFinished {
+                    try transfers.finish(id: key, state: state, bytes: payload.bytes, error: payload.error, name: payload.name)
+                } else {
+                    try transfers.update(id: key, bytes: payload.bytes, totalBytes: payload.total, state: payload.state, name: payload.name)
+                }
+                return .json(200, Self.describe(transfer))
+            }
+        case ("DELETE", let id?):
+            return perform {
+                let key = "api-\(id)"
+                guard transfers.transfer(id: key)?.source == .liveAPI else { throw TransferManager.Failure.notFound }
+                try transfers.finish(id: key, state: .cancelled)
+                return HTTPResponse(status: 204, body: Data())
+            }
+        default:
+            return .error(405, "Method not allowed")
+        }
+    }
+
+    private static func describe(_ transfer: Transfer) -> [String: Any] {
+        var object: [String: Any] = ["id": String(transfer.id.dropFirst(4)), "name": transfer.name, "kind": transfer.kind.rawValue,
+                                     "state": transfer.state.rawValue, "bytes": transfer.bytes]
+        if let total = transfer.totalBytes { object["total"] = total }
+        if let progress = transfer.progress { object["progress"] = progress }
+        return object
     }
 
     private func perform(_ work: () throws -> HTTPResponse) -> HTTPResponse {
@@ -189,6 +244,12 @@ final class LiveAPIRouter {
             return .error(404, "No activity with this id")
         } catch LiveActivityStore.Failure.tooMany {
             return .error(429, "Too many activities at once")
+        } catch TransferManager.Failure.notFound {
+            return .error(404, "No transfer with this id")
+        } catch TransferManager.Failure.alreadyFinished {
+            return .error(409, "This transfer has already ended")
+        } catch TransferManager.Failure.tooMany {
+            return .error(429, "Too many transfers at once")
         } catch {
             return .error(400, "Invalid request")
         }
@@ -216,6 +277,7 @@ final class LiveAPIRouter {
             "icons": LiveActivityLimits.icons.keys.sorted(),
             "states": ExternalActivity.State.allCases.map(\.rawValue),
             "priorities": ExternalActivity.RequestedPriority.allCases.map(\.rawValue),
+            "transfers": acceptsTransfers && transfers != nil,
             "limits": [
                 "maximumActive": LiveActivityLimits.maximumActive,
                 "maximumBodyBytes": LiveActivityLimits.maximumBody,

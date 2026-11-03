@@ -114,6 +114,29 @@ enum MediaSourcePreference: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// How far one volume or brightness key press moves the level, in whole percentage points.
+enum VolumeStep: String, CaseIterable, Identifiable, Sendable {
+    case two, five, ten
+
+    var id: String { rawValue }
+    var points: Int {
+        switch self {
+        case .two: 2
+        case .five: 5
+        case .ten: 10
+        }
+    }
+    var title: String { "\(points)%" }
+
+    /// The next multiple of `step` past `percentage` in `direction`, so a level off the grid
+    /// lands on it rather than keeping its offset. Whole numbers, so no float drift.
+    static func next(from percentage: Int, direction: Int, step: Int) -> Int {
+        let level = percentage.clamped(to: 0...100)
+        let target = direction > 0 ? (level / step + 1) * step : ((level + step - 1) / step - 1) * step
+        return target.clamped(to: 0...100)
+    }
+}
+
 /// Manual correction applied on top of the geometry macOS reports.
 struct NotchCalibration: Codable, Equatable, Sendable {
     var offsetX: CGFloat = 0

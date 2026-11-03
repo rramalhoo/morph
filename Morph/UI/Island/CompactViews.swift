@@ -29,7 +29,11 @@ struct LiveCompactView: View {
     @Environment(TimerService.self) private var timers
     @Environment(FocusService.self) private var focus
     @Environment(LiveActivityStore.self) private var external
+    @Environment(MorphContinuityManager.self) private var continuity: MorphContinuityManager?
+    @Environment(MorphPreferences.self) private var preferences
     @Environment(\.morphAccent) private var accent
+
+    private var phone: ContinuityActivity? { continuity?.activities.first }
 
     var body: some View {
         NotchEars(notch: notch, inset: inset) {
@@ -60,6 +64,11 @@ struct LiveCompactView: View {
             Image(systemName: external.featured?.symbol ?? "dot.radiowaves.left.and.right")
                 .foregroundStyle(accent)
                 .font(MorphFont.compact)
+        case .continuity:
+            Image(systemName: phone?.symbol ?? "iphone")
+                .foregroundStyle(phone?.isStale == true ? MorphColor.textSecondary : accent)
+                .font(MorphFont.compact)
+                .contentTransition(.symbolEffect(.replace))
         }
     }
 
@@ -92,6 +101,10 @@ struct LiveCompactView: View {
                         .fixedSize()
                 }
             }
+        case .continuity:
+            if let phone {
+                ContinuityIndicator(activity: phone, hidesDetails: preferences.continuityHidesSensitive)
+            }
         case .external:
             if let progress = external.featured?.progress {
                 HStack(spacing: MorphSpacing.xs) {
@@ -117,6 +130,7 @@ struct LiveCompactView: View {
         case .stopwatch: "Stopwatch running"
         case .focus: "\(focus.session.phase.title) running"
         case .external: external.featured?.title ?? "Activity running"
+        case .continuity: phone.map { "\($0.payload.service) on \($0.deviceName)" } ?? "iPhone activity"
         }
     }
 }
@@ -262,7 +276,7 @@ struct ActivityView: View {
     var body: some View {
         Group {
             switch activity.presentation {
-            case .minimal, .level, .screenshot:
+            case .minimal, .level, .screenshot, .welcome, .transfer:
                 NotchEars(notch: notch, inset: inset) {
                     HStack(spacing: MorphSpacing.xs + 2) {
                         Image(systemName: content.symbol)
@@ -312,5 +326,40 @@ struct ActivityView: View {
     private var minimalLeadingText: String {
         if case .nowPlaying(let title, _) = content { return title }
         return content.title
+    }
+}
+
+/// The trailing ear for an iPhone activity: a countdown when there's an end time, real progress
+/// when there's progress, and otherwise the service, or the title when it may be shown.
+struct ContinuityIndicator: View {
+    let activity: ContinuityActivity
+    let hidesDetails: Bool
+
+    @Environment(\.morphAccent) private var accent
+
+    var body: some View {
+        Group {
+            if let endsAt = activity.payload.endsAt, endsAt > .now, activity.payload.state == .running {
+                Text(timerInterval: Date.now...endsAt, countsDown: true)
+                    .font(MorphFont.compact)
+                    .foregroundStyle(MorphColor.textPrimary)
+                    .monospacedDigit()
+                    .frame(width: 52, alignment: .trailing)
+            } else if let progress = activity.payload.progress {
+                HStack(spacing: MorphSpacing.xs) {
+                    ProgressRing(fraction: progress, color: accent)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(MorphFont.compact)
+                        .foregroundStyle(MorphColor.textPrimary)
+                        .fixedSize()
+                }
+            } else {
+                Text(hidesDetails && activity.payload.sensitive ? activity.payload.service : activity.payload.title)
+                    .font(MorphFont.compact)
+                    .foregroundStyle(MorphColor.textPrimary)
+                    .lineLimit(1)
+            }
+        }
+        .opacity(activity.isStale ? 0.55 : 1)
     }
 }

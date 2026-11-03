@@ -46,6 +46,8 @@ final class IslandController {
     var isExportingDrag = false
     /// Set from the window arrangement: full screen apps ask the island to step back.
     private(set) var cinema = CinemaState.normal
+    /// The session is locked or away. The island is only the notch, whatever else is going on.
+    private(set) var isConcealed = false
 
     @ObservationIgnored private var machine = IslandStateMachine()
     @ObservationIgnored private var hoverWork: (any ScheduledWork)?
@@ -59,11 +61,14 @@ final class IslandController {
     private let volume: VolumeService
     private let focus: FocusService?
     private let external: LiveActivityStore?
+    private let transfers: TransferManager?
+    private let continuity: MorphContinuityManager?
     private let scheduler: any Scheduling
 
     init(preferences: MorphPreferences, activities: ActivityManager, timers: TimerService,
          media: MediaController, volume: VolumeService, scheduler: any Scheduling,
-         focus: FocusService? = nil, external: LiveActivityStore? = nil) {
+         focus: FocusService? = nil, external: LiveActivityStore? = nil, transfers: TransferManager? = nil,
+         continuity: MorphContinuityManager? = nil) {
         self.preferences = preferences
         self.activities = activities
         self.timers = timers
@@ -71,6 +76,8 @@ final class IslandController {
         self.volume = volume
         self.focus = focus
         self.external = external
+        self.transfers = transfers
+        self.continuity = continuity
         self.scheduler = scheduler
     }
 
@@ -80,6 +87,7 @@ final class IslandController {
     }
 
     var presentation: IslandPresentation {
+        if isConcealed { return .idle }
         switch mode {
         case .expanded:
             return .expanded(resolvedTab)
@@ -108,6 +116,16 @@ final class IslandController {
         cinema != .hidden || activities.current?.priority == .critical
     }
 
+    /// Concealing ends anything in progress: hover, an open panel, a drag over the island.
+    func setConcealed(_ concealed: Bool) {
+        guard concealed != isConcealed else { return }
+        isConcealed = concealed
+        guard concealed else { return }
+        isFileDragActive = false
+        isExportingDrag = false
+        send(.reset)
+    }
+
     func update(cinema state: CinemaState) {
         guard state != cinema else { return }
         cinema = state
@@ -121,7 +139,8 @@ final class IslandController {
             case .timers: preferences.timerEnabled
             case .focus: preferences.focusEnabled && focus != nil
             case .battery: true
-            case .activities: external?.activities.isEmpty == false
+            case .activities: external?.activities.isEmpty == false || showsContinuity
+            case .transfers: preferences.transfersEnabled && transfers?.transfers.isEmpty == false
             case .shelf: preferences.shelfEnabled
             }
         }
@@ -140,8 +159,13 @@ final class IslandController {
             if timers.stopwatch.isRunning { return .stopwatch }
         }
         if external?.featured != nil { return .external }
+        if showsContinuity { return .continuity }
         if preferences.musicEnabled, media.isLive { return .media }
         return nil
+    }
+
+    var showsContinuity: Bool {
+        preferences.continuityEnabled && preferences.showContinuityActivities && continuity?.activities.isEmpty == false
     }
 
     func send(_ event: IslandEvent) {

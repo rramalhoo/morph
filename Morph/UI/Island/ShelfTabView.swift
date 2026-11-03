@@ -5,6 +5,13 @@ import SwiftUI
 struct ShelfTabView: View {
     @Environment(FileShelfStore.self) private var shelf
     @Environment(IslandController.self) private var island
+    @Environment(\.airDropAction) private var airDropAction
+    @Environment(MorphPreferences.self) private var preferences
+
+    private var sendWithAirDrop: AirDropAction? {
+        guard let airDropAction, airDropAction.isAvailable, preferences.transfersEnabled, preferences.showAirDrop else { return nil }
+        return airDropAction
+    }
     @State private var previewURL: URL?
 
     var body: some View {
@@ -26,6 +33,11 @@ struct ShelfTabView: View {
                             .font(MorphFont.label)
                             .foregroundStyle(MorphColor.textSecondary)
                         Spacer()
+                        if let sendWithAirDrop {
+                            MorphIconButton(symbol: "airdrop", label: "Send with AirDrop", size: 11) {
+                                sendWithAirDrop(shelf.items.map(\.url))
+                            }
+                        }
                         MorphIconButton(symbol: "trash", label: "Clear Shelf", size: 11, action: shelf.removeAll)
                     }
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -51,6 +63,13 @@ private struct ShelfTile: View {
     let onPreview: () -> Void
 
     @Environment(FileShelfStore.self) private var shelf
+    @Environment(\.airDropAction) private var airDropAction
+    @Environment(MorphPreferences.self) private var preferences
+
+    private var sendWithAirDrop: AirDropAction? {
+        guard let airDropAction, airDropAction.isAvailable, preferences.transfersEnabled, preferences.showAirDrop else { return nil }
+        return airDropAction
+    }
 
     var body: some View {
         VStack(spacing: MorphSpacing.xs) {
@@ -73,6 +92,9 @@ private struct ShelfTile: View {
             Button("Quick Look", action: onPreview)
             Button("Open") { shelf.open(item) }
             Button("Show in Finder") { shelf.reveal(item) }
+            if let sendWithAirDrop {
+                Button("Send with AirDrop…") { sendWithAirDrop([item.url]) }
+            }
             Divider()
             Button("Remove from Shelf") { shelf.remove(item) }
         }

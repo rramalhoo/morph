@@ -25,6 +25,7 @@ struct ExpandedPanelView: View {
                 case .focus: FocusTabView()
                 case .battery: BatteryTabView()
                 case .activities: ActivitiesTabView()
+                case .transfers: TransfersTabView()
                 case .shelf: ShelfTabView()
                 }
             }

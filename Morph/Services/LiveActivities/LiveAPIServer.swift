@@ -163,6 +163,12 @@ final class LiveAPIService {
                                port: { [weak self] in self?.port ?? 0 })
     }
 
+    /// Lets scripts report transfers through the same server, token and limits.
+    func attach(transfers: TransferManager, enabled: Bool) {
+        router.transfers = transfers
+        router.acceptsTransfers = enabled
+    }
+
     /// Makes the server match the settings. Calling it again with the same values does nothing.
     func apply(enabled: Bool, port newPort: Int) {
         guard enabled else {

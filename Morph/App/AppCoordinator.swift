@@ -10,8 +10,13 @@ final class AppCoordinator {
     private let battery = BatteryService()
     private let shelf = FileShelfStore()
     private let launchAtLogin = LaunchAtLoginService()
-    private let notifications = TimerNotificationService()
-    private let focusNotifications = TimerNotificationService(identifier: "com.athene.morph.focus")
+    private let notifications: NotificationService
+    private let session: LockScreenCoordinator
+    private let transfers: TransferManager
+    private let downloads: DownloadFolderMonitor
+    private let airDrop: AirDropSender
+    private let continuity: MorphContinuityManager
+    private let continuityListener: ContinuityListener
     private let activities: ActivityManager
     private let timers: TimerService
     private let media: MediaController
@@ -36,7 +41,6 @@ final class AppCoordinator {
     private var cinema: CinemaService!
 
     private var loops: [ObservationLoop] = []
-    private var workspaceTokens: [any NSObjectProtocol] = []
     private var sessionTokens: [(center: NotificationCenter, token: any NSObjectProtocol)] = []
     /// Asleep, locked or switched away: the island can't answer, so macOS keeps the keys.
     private var levelKeysSuspended = false
@@ -48,6 +52,13 @@ final class AppCoordinator {
 
     init() {
         activities = ActivityManager(scheduler: scheduler)
+        notifications = NotificationService(center: SystemNotificationCenter(), scheduler: scheduler)
+        session = LockScreenCoordinator(signals: SystemSessionSignals(), probe: CGSessionProbe(), scheduler: scheduler)
+        transfers = TransferManager(scheduler: scheduler)
+        downloads = DownloadFolderMonitor(transfers: transfers, scheduler: scheduler)
+        airDrop = AirDropSender(transfers: transfers)
+        continuity = MorphContinuityManager(store: KeychainContinuityKeyStore(), scheduler: scheduler)
+        continuityListener = ContinuityListener(manager: continuity)
         timers = TimerService(scheduler: scheduler)
         focus = FocusService(scheduler: scheduler)
         screenshots = ScreenshotService(scheduler: scheduler)
@@ -74,7 +85,7 @@ final class AppCoordinator {
         waveform = WaveformService(capture: ProcessTapCapture(), scheduler: scheduler)
         island = IslandController(preferences: preferences, activities: activities, timers: timers,
                                   media: media, volume: volume, scheduler: scheduler,
-                                  focus: focus, external: externalActivities)
+                                  focus: focus, external: externalActivities, transfers: transfers, continuity: continuity)
 
         quickActions = QuickActionRunner(
             preferences: preferences,
@@ -100,8 +111,8 @@ final class AppCoordinator {
 
     func start() {
         wireEvents()
-        observeSleep()
-        observeSession()
+        wireSession()
+        observeDisplays()
         levelKeys.refreshSupport()
         applyFocusConfiguration()
         focus.restore()
@@ -117,14 +128,20 @@ final class AppCoordinator {
             ObservationLoop { [weak self] in self?.applyScreenshots() },
             ObservationLoop { [weak self] in self?.applyLiveAPI() },
             ObservationLoop { [weak self] in self?.applyDeviceBattery() },
+            ObservationLoop { [weak self] in self?.applyNotifications() },
+            ObservationLoop { [weak self] in self?.applyTransfers() },
+            ObservationLoop { [weak self] in self?.applyContinuity() },
         ]
+        notifications.refreshAuthorization()
+        session.start()
     }
 
     func stop() {
         loops.forEach { $0.invalidate() }
         loops = []
-        workspaceTokens.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
-        workspaceTokens = []
+        session.stop()
+        downloads.apply(enabled: false, bookmark: nil)
+        continuityListener.stop()
         sessionTokens.forEach { $0.center.removeObserver($0.token) }
         sessionTokens = []
         levelKeys.apply(.off)
@@ -167,7 +184,14 @@ final class AppCoordinator {
         .environment(screenshots)
         .environment(externalActivities)
         .environment(deviceBattery)
+        .environment(transfers)
+        .environment(continuity)
         .environment(\.quickActionRunner, quickActions)
+        .environment(\.airDropAction, airDropAction)
+    }
+
+    private var airDropAction: AirDropAction {
+        AirDropAction(isAvailable: airDrop.isAvailable) { [weak self] urls in self?.sendWithAirDrop(urls) }
     }
 
     private var settingsView: some View {
@@ -185,6 +209,11 @@ final class AppCoordinator {
             .environment(externalActivities)
             .environment(focus)
             .environment(deviceBattery)
+            .environment(notifications)
+            .environment(transfers)
+            .environment(downloads)
+            .environment(continuity)
+            .environment(continuityListener)
     }
 
     // MARK: - Wiring
@@ -216,22 +245,25 @@ final class AppCoordinator {
         timers.onCompleted = { [weak self] duration in
             self?.present(.timerCompleted(duration: duration.timeInterval))
         }
+        // Scheduled ahead, so macOS delivers it on time even if the Mac is locked by then.
         timers.onNotificationChange = { [weak self] remaining in
             guard let self else { return }
-            if let remaining, self.preferences.timerNotifications {
-                self.notifications.schedule(after: remaining)
+            if let remaining {
+                self.notifications.post(MorphNotification(kind: .timer, identifier: "com.athene.morph.timer",
+                                                          title: "Timer finished", delay: remaining))
             } else {
-                self.notifications.cancel()
+                self.notifications.cancel(identifier: "com.athene.morph.timer")
             }
         }
         shelf.onAdded = { [weak self] count in self?.present(.filesAdded(count: count)) }
         focus.onFinished = { [weak self] phase in self?.activities.present(.focusFinished(phase)) }
         focus.onNotificationChange = { [weak self] remaining, title in
             guard let self else { return }
-            if let remaining, self.preferences.focusNotifications {
-                self.focusNotifications.schedule(after: remaining, title: title)
+            if let remaining {
+                self.notifications.post(MorphNotification(kind: .focus, identifier: "com.athene.morph.focus",
+                                                          title: title, delay: remaining))
             } else {
-                self.focusNotifications.cancel()
+                self.notifications.cancel(identifier: "com.athene.morph.focus")
             }
         }
         screenshots.onCaptured = { [weak self] preview in
@@ -247,12 +279,21 @@ final class AppCoordinator {
             switch change {
             case .started(let activity): self.present(.external(activity))
             case .finished(let activity):
-                if activity.state == .success || activity.state == .failed { self.present(.external(activity)) }
+                guard activity.state == .success || activity.state == .failed else { return }
+                self.present(.external(activity))
+                self.notifyIfUnseen(MorphNotification(kind: .activity, identifier: "com.athene.morph.activity-\(activity.id)",
+                                                      title: activity.state == .success ? "Activity finished" : "Activity failed",
+                                                      body: nil, detail: activity.title))
             }
         }
+        transfers.onEvent = { [weak self] event in self?.handle(event) }
+        continuity.onEvent = { [weak self] event in self?.handle(event) }
         deviceBattery.onLow = { [weak self] reading in
             guard let percentage = reading.percentage else { return }
             self?.present(.peripheralLow(name: reading.name, percentage: percentage))
+            self?.notifyIfUnseen(MorphNotification(kind: .deviceAlert, identifier: "com.athene.morph.device-\(reading.name)",
+                                                   title: "Device battery low", body: nil,
+                                                   detail: "\(reading.name): \(percentage)% remaining"))
         }
     }
 
@@ -296,8 +337,12 @@ final class AppCoordinator {
             present(.fullyCharged)
         case .low(let percentage):
             activities.present(.batteryLow(percentage: percentage))
+            notifyIfUnseen(MorphNotification(kind: .lowBattery, identifier: "com.athene.morph.battery", title: "Battery low",
+                                             body: "\(percentage)% remaining"))
         case .critical(let percentage):
             activities.present(.batteryCritical(percentage: percentage))
+            notifyIfUnseen(MorphNotification(kind: .lowBattery, identifier: "com.athene.morph.battery", title: "Battery critical",
+                                             body: "\(percentage)% remaining. Connect power soon."))
         }
     }
 
@@ -338,56 +383,150 @@ final class AppCoordinator {
         preferences.peripheralBattery ? peripherals.percentage(forDeviceNamed: device.name) : nil
     }
 
-    private func observeSleep() {
-        let center = NSWorkspace.shared.notificationCenter
-        workspaceTokens.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.island.send(.reset)
-                self?.activities.removeAll()
-                self?.waveform.stopNow()
-                self?.screenshots.setSessionActive(false)
-                self?.setLevelKeysSuspended(true)
-            }
-        })
-        workspaceTokens.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.setLevelKeysSuspended(false)
-                guard self.isActive else { return }
-                self.applyWaveformDemand()
-                self.battery.refresh()
-                self.media.requestRefresh()
-                self.volume.resynchronize()
-                if self.preferences.cinemaMode != .normal { self.cinema.signal() }
-            }
-        })
+    // MARK: - Transfers and Continuity
+
+    private func sendWithAirDrop(_ urls: [URL]) {
+        if !airDrop.send(urls) { activities.present(.actionFailed(message: "AirDrop can't send these files")) }
     }
 
-    /// macOS keeps the keys wherever the island can't show the result: the HUD is the point of
-    /// taking them over.
-    private func observeSession() {
-        let workspace = NSWorkspace.shared.notificationCenter
-        let distributed = DistributedNotificationCenter.default()
-        let events: [(NotificationCenter, Notification.Name, Bool)] = [
-            (workspace, NSWorkspace.sessionDidResignActiveNotification, true),
-            (workspace, NSWorkspace.sessionDidBecomeActiveNotification, false),
-            (distributed, Notification.Name("com.apple.screenIsLocked"), true),
-            (distributed, Notification.Name("com.apple.screenIsUnlocked"), false),
-        ]
-        for (center, name, suspended) in events {
-            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.screenshots.setSessionActive(!suspended)
-                    if suspended, case .screenshot? = self?.activities.current?.content { self?.activities.dismissCurrent() }
-                    self?.setLevelKeysSuspended(suspended)
-                }
-            }
-            sessionTokens.append((center, token))
+    private func shows(_ transfer: Transfer) -> Bool {
+        guard preferences.transfersEnabled else { return false }
+        return switch transfer.kind {
+        case .download: preferences.showDownloads
+        case .upload: preferences.showUploads
+        case .airDropReceive, .airDropSend: preferences.showAirDrop
         }
+    }
+
+    /// One activity for all transfers: the newest event leads, and the rest are a count.
+    private func handle(_ event: TransferManager.Event) {
+        let transfer: Transfer
+        switch event {
+        case .started(let started), .progressed(let started): transfer = started
+        case .finished(let finished):
+            guard preferences.transferCompletionAnimation else { return }
+            transfer = finished
+        }
+        guard shows(transfer) else { return }
+        let others = transfers.active.filter { $0.id != transfer.id && shows($0) }.count
+        present(.transfer(transfer, others: others))
+    }
+
+    private func handle(_ event: MorphContinuityManager.Event) {
+        guard preferences.continuityEnabled, preferences.showContinuityActivities else { return }
+        let hides = preferences.continuityHidesSensitive
+        switch event {
+        case .started(let activity):
+            present(.continuity(activity, hidesDetails: hides))
+        case .updated(let activity):
+            // Routine updates move the compact view in place. Only an outcome is announced.
+            guard activity.payload.state == .success || activity.payload.state == .failed else { return }
+            present(.continuity(activity, hidesDetails: hides))
+        case .ended(let activity):
+            activities.cancel(matching: .continuity(activity, hidesDetails: hides))
+        }
+    }
+
+    private func applyTransfers() {
+        transfers.historyDuration = .seconds(preferences.transferHistoryMinutes * 60)
+        let watch = preferences.transfersEnabled && preferences.monitorDownloads && preferences.isEnabled
+        downloads.apply(enabled: watch, bookmark: preferences.downloadsFolder)
+        liveAPI.attach(transfers: transfers, enabled: preferences.transfersEnabled && preferences.showUploads)
+        if !preferences.transfersEnabled { transfers.removeAll() }
+    }
+
+    private func applyContinuity() {
+        let enabled = preferences.continuityEnabled && preferences.isEnabled
+        continuityListener.apply(enabled: enabled)
+        if !enabled {
+            continuity.cancelPairing()
+            continuity.removeAllActivities()
+        }
+    }
+
+    /// Immediate notifications only go out when the island can't say it: locked, away, paused or
+    /// hidden. Otherwise the island already did, and a banner on top would be noise.
+    private func notifyIfUnseen(_ notification: MorphNotification) {
+        let islandVisible = isActive && session.state == .active && window.isVisible && island.shouldShowPanel
+        guard !islandVisible else { return }
+        notifications.post(notification)
+    }
+
+    private func observeDisplays() {
         let screens = NotificationCenter.default
         sessionTokens.append((screens, screens.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.levelKeys.displaysDidChange() }
         }))
+    }
+
+    // MARK: - Lock Screen
+
+    private func wireSession() {
+        session.onConceal = { [weak self] in self?.concealSession() }
+        session.onSuspend = { [weak self] in self?.window.setSuspended(true) }
+        session.onRestore = { [weak self] in self?.restoreSession() }
+        session.onReveal = { [weak self] in self?.revealSession($0) }
+    }
+
+    /// Runs the moment a lock, sleep or switch is announced. Private content goes first; the
+    /// island collapses to the notch while macOS still draws it, and leaves the screen once the
+    /// lock settles. macOS's own lock screen sits above all of this regardless.
+    private func concealSession() {
+        activities.setSuppressed(true)
+        island.setConcealed(true)
+        screenshots.setSessionActive(false)
+        screenshots.clear()
+        waveform.stopNow()
+        setLevelKeysSuspended(true)
+        if !(preferences.lockScreenEnabled && preferences.lockAnimation) { window.setSuspended(true) }
+    }
+
+    /// Back from a lock, sleep or switch, still concealed: the window, its geometry and the
+    /// services that may have missed changes while away.
+    private func restoreSession() {
+        window.setSuspended(false)
+        setLevelKeysSuspended(false)
+        screenshots.setSessionActive(true)
+        notifications.refreshAuthorization()
+        guard isActive else { return }
+        battery.refresh()
+        media.requestRefresh()
+        volume.resynchronize()
+        deviceBattery.refresh(force: true)
+        if preferences.cinemaMode != .normal { cinema.signal() }
+    }
+
+    private func revealSession(_ sessionReturn: SessionReturn) {
+        window.setSuspended(false)
+        island.setConcealed(false)
+        // Whatever waited out the lock and is still current comes back first.
+        activities.setSuppressed(false)
+        guard isActive, preferences.lockScreenEnabled else { return }
+
+        let policy = WelcomePolicy(integrationEnabled: preferences.lockScreenEnabled, welcomeEnabled: preferences.welcomeEnabled,
+                                   activitiesEnabled: preferences.activitiesEnabled, islandIdle: island.mode == .idle,
+                                   cinemaNormal: island.cinema == .normal, currentPriority: activities.current?.priority)
+        if policy.allows(sessionReturn) {
+            activities.present(.welcome(makeWelcome(awayFor: sessionReturn.awayFor)),
+                               duration: .seconds(preferences.welcomeDuration))
+        } else if sessionReturn.welcome, preferences.welcomeShowsMusic, preferences.musicEnabled,
+                  let snapshot = media.snapshot, snapshot.isPlaying, let track = snapshot.track {
+            present(.nowPlaying(title: track.title, artist: track.artist))
+        }
+    }
+
+    private func makeWelcome(awayFor: Duration?) -> WelcomeContent {
+        let now = Date.now
+        var welcome = WelcomeContent(greeting: .resolve(hour: Calendar.current.component(.hour, from: now), awayFor: awayFor),
+                                     date: now)
+        if preferences.welcomeShowsBattery, preferences.batteryEnabled, let snapshot = battery.snapshot {
+            welcome.battery = .init(percentage: snapshot.percentage, isCharging: snapshot.isCharging, symbol: snapshot.symbol)
+        }
+        if preferences.welcomeShowsMusic, preferences.musicEnabled, let snapshot = media.snapshot,
+           snapshot.isPlaying, let track = snapshot.track {
+            welcome.music = .init(title: track.title, artist: track.artist, isPlaying: true)
+        }
+        return welcome
     }
 
     private func setLevelKeysSuspended(_ suspended: Bool) {
@@ -488,6 +627,15 @@ final class AppCoordinator {
                       port: preferences.liveAPIPort.clamped(to: MorphPreferences.liveAPIPortRange))
     }
 
+    private func applyNotifications() {
+        notifications.settings = NotificationSettings(enabled: preferences.notificationsEnabled,
+                                                      previews: preferences.notificationPreviews,
+                                                      timer: preferences.timerNotifications,
+                                                      focus: preferences.focusNotifications,
+                                                      lowBattery: preferences.lowBatteryNotifications,
+                                                      deviceAlerts: preferences.peripheralAlerts)
+    }
+
     private func applyDeviceBattery() {
         deviceBattery.alertsEnabled = preferences.peripheralAlerts
         deviceBattery.lowThreshold = preferences.lowBatteryThreshold
@@ -547,6 +695,7 @@ final class AppCoordinator {
         let bundle = Bundle.main.infoDictionary
         var lines = [
             "Morph \(bundle?["CFBundleShortVersionString"] as? String ?? "?") (\(bundle?["CFBundleVersion"] as? String ?? "?"))",
+            "Path: \(Bundle.main.bundlePath)",
             "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
             "State: \(isActive ? "active" : "paused"), mode \(island.mode)",
         ]
@@ -570,7 +719,7 @@ final class AppCoordinator {
         if let output = volume.output {
             lines.append("Output: \(output.device.name) (\(output.device.transport)), volume \(output.percentage.map { "\($0)%" } ?? "not reported"), settable \(output.canSetVolume)")
         }
-        lines.append("Level keys: \(levelKeys.status), volume handed back \(levelKeys.volumeHandedBack), brightness handed back \(levelKeys.brightnessHandedBack), brightness supported \(levelKeys.brightnessSupported)")
+        lines.append("Level keys: \(levelKeys.status), volume handed back \(levelKeys.volumeHandedBack), volume step \(preferences.volumeStep.points)%, brightness handed back \(levelKeys.brightnessHandedBack), brightness supported \(levelKeys.brightnessSupported)")
         lines.append("Waveform: \(waveform.diagnostics)")
         lines.append("Screenshots: \(screenshots.status)")
         lines.append("Live API: \(liveAPI.status), \(externalActivities.activities.count) open, \(liveAPI.handledCount) requests, \(liveAPI.rejectedCount) rejected")
@@ -578,6 +727,10 @@ final class AppCoordinator {
         lines.append("Peripherals: \(deviceBattery.peripherals.count) with a known battery")
         lines.append("Cinema: \(island.cinema), evidence \(cinema.evidence)")
         lines.append("Launch at login: \(launchAtLogin.status.rawValue)")
+        lines.append("Session: \(session.state), \(session.returnCount) returns, lock screen integration \(preferences.lockScreenEnabled ? "on" : "off")")
+        lines.append("Transfers: \(transfers.active.count) active, \(transfers.recent.count) recent, downloads folder \(downloads.status)")
+        lines.append("Continuity: \(continuityListener.status), \(continuity.devices.count) paired, \(continuity.connected.count) connected, \(continuity.activities.count) activities, \(continuity.refusedCount) refused\(continuity.lastProblem.map { ", last: \($0)" } ?? "")")
+        lines.append("Notifications: \(notifications.authorization), \(notifications.sentCount) sent, \(notifications.droppedCount) held back")
         return lines.joined(separator: "\n")
     }
 }

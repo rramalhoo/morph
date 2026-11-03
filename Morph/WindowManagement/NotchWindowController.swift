@@ -23,6 +23,8 @@ final class NotchWindowController {
     private(set) var currentMetrics: ScreenMetrics?
     private(set) var currentDisplay: DisplayCandidate?
     private var currentDisplayIdentifier: String?
+    /// The session is locked or away. The panel stays built, just off screen.
+    private var isSuspended = false
 
     /// Where the island lives, in the coordinates window listings use (origin at the top-left).
     var currentDisplayArea: DisplayArea? {
@@ -50,7 +52,7 @@ final class NotchWindowController {
         self.panel = panel
         observeSystem()
         updateDisplay()
-        panel.orderFrontRegardless()
+        if !isSuspended { panel.orderFrontRegardless() }
 
         loops = [
             ObservationLoop { [weak self] in self?.followIsland() },
@@ -74,6 +76,21 @@ final class NotchWindowController {
         panel = nil
         container = nil
         island.send(.reset)
+    }
+
+    /// Off screen while the session is locked or away, without tearing anything down. Coming back
+    /// re-reads the displays, since one may have been connected or removed meanwhile.
+    func setSuspended(_ suspended: Bool) {
+        guard suspended != isSuspended else { return }
+        isSuspended = suspended
+        guard let panel else { return }
+        if suspended {
+            shrinkTask?.cancel()
+            shrinkTask = nil
+            panel.orderOut(nil)
+        } else {
+            updateDisplay()
+        }
     }
 
     // MARK: - Construction
@@ -156,7 +173,7 @@ final class NotchWindowController {
 
     private func followCinema() {
         guard let panel else { return }
-        if island.shouldShowPanel {
+        if island.shouldShowPanel, !isSuspended {
             panel.orderFrontRegardless()
         } else {
             panel.orderOut(nil)

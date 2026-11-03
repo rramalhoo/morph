@@ -32,6 +32,12 @@
 	<string>Morph reads the current track from Apple Music or Spotify and sends play, pause and skip commands. It only contacts a player that is already running.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Morph analyzes the sound of your music player live so the island's bars move with the music. Audio is never recorded, saved or sent anywhere, and the microphone is not used.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_morphsync._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Morph Continuity lets an iPhone you paired with a QR code send its activities to this Mac over your local network. Nothing is sent to the internet.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Your Mac. More alive.</string>
 	<key>NSPrincipalClass</key>

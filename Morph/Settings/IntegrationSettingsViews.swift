@@ -104,6 +104,7 @@ private struct LevelHUDSection: View {
     @Binding var replace: Bool
     @Binding var showPercentage: Bool
     @Binding var duration: Double
+    var step: Binding<VolumeStep>? = nil
     let isSupported: Bool
     let unsupportedReason: String
     let handedBack: Bool
@@ -143,6 +144,12 @@ private struct LevelHUDSection: View {
             }
             Toggle("Show Percentage", isOn: $showPercentage)
                 .disabled(!show)
+            if let step {
+                Picker("\(title) Step", selection: step) {
+                    ForEach(VolumeStep.allCases) { Text($0.title).tag($0) }
+                }
+                .disabled(!show || !replace || !isSupported)
+            }
             LabeledContent("HUD Duration") {
                 HStack {
                     Slider(value: $duration, in: MorphPreferences.hudDurationRange, step: 0.1)
@@ -173,18 +180,18 @@ struct SystemSettingsView: View {
         Form {
             LevelHUDSection(title: "Volume", show: $preferences.volumeIndicator, replace: $preferences.replaceVolumeHUD,
                             showPercentage: $preferences.volumeShowsPercentage, duration: $preferences.volumeHUDDuration,
-                            isSupported: volume.isControllable,
+                            step: $preferences.volumeStep, isSupported: volume.isControllable,
                             unsupportedReason: "This output has no software volume. macOS handles its keys.",
                             handedBack: levelKeys.volumeHandedBack,
                             handedBackReason: "This output refused a change, so macOS handles its keys",
-                            footer: "Replacing needs Accessibility permission. Morph sees only the volume and brightness keys, never typing. If you still see the macOS indicator, that key is reaching macOS: turn this off and on again. Option with a volume key stays with macOS.")
+                            footer: "Replacing needs Accessibility permission. Morph sees only the volume and brightness keys, never typing. If you still see the macOS indicator, that key is reaching macOS: turn this off and on again. Option with a volume key stays with macOS. Volume Step applies only to the keys Morph handles; Shift and Option together move 1%.")
             LevelHUDSection(title: "Brightness", show: $preferences.brightnessIndicator, replace: $preferences.replaceBrightnessHUD,
                             showPercentage: $preferences.brightnessShowsPercentage, duration: $preferences.brightnessHUDDuration,
-                            isSupported: levelKeys.brightnessSupported,
+                            step: $preferences.brightnessStep, isSupported: levelKeys.brightnessSupported,
                             unsupportedReason: "No built-in display that Morph can control. macOS handles the keys.",
                             handedBack: levelKeys.brightnessHandedBack,
                             handedBackReason: "The display refused a change, so macOS handles the keys",
-                            footer: "Replacing also gives the HUD a real level. It uses a private macOS interface, for the built-in display only, because no public one exists; it could stop working after a macOS update, and the keys then return to macOS. Without it, Morph shows only the direction. Control Center's slider and automatic brightness show no HUD.")
+                            footer: "Replacing also gives the HUD a real level. It uses a private macOS interface, for the built-in display only, because no public one exists; it could stop working after a macOS update, and the keys then return to macOS. Without it, Morph shows only the direction. Brightness Step applies only to the keys Morph handles; Shift and Option together move 1%. Control Center's slider and automatic brightness show no HUD.")
             Section {
                 Picker("In full screen apps", selection: $preferences.cinemaMode) {
                     ForEach(CinemaMode.allCases) { Text($0.title).tag($0) }

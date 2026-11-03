@@ -1,10 +1,15 @@
 import SwiftUI
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, appearance, behavior, music, devices, system, screenshots, focus, activities, modules, advanced
+    case general, appearance, behavior, music, devices, system, lockScreen, notifications, transfers, continuity, screenshots, focus, activities, modules, advanced
 
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+    var title: String {
+        switch self {
+        case .lockScreen: "Lock Screen"
+        default: rawValue.capitalized
+        }
+    }
 
     var symbol: String {
         switch self {
@@ -14,6 +19,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .music: "waveform"
         case .devices: "airpodspro"
         case .system: "macbook"
+        case .lockScreen: "lock.fill"
+        case .notifications: "bell.badge"
+        case .transfers: "arrow.up.arrow.down.circle"
+        case .continuity: "iphone"
         case .screenshots: "camera.viewfinder"
         case .focus: "brain.head.profile"
         case .activities: "dot.radiowaves.left.and.right"
@@ -43,6 +52,10 @@ struct SettingsRootView: View {
                 case .music: MusicSettingsView()
                 case .devices: DevicesSettingsView()
                 case .system: SystemSettingsView()
+                case .lockScreen: LockScreenSettingsView()
+                case .notifications: NotificationSettingsView()
+                case .transfers: TransfersSettingsView()
+                case .continuity: ContinuitySettingsView()
                 case .screenshots: ScreenshotSettingsView()
                 case .focus: FocusSettingsView()
                 case .activities: LiveActivitySettingsView()

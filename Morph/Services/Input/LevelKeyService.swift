@@ -53,6 +53,8 @@ final class LevelKeyService {
     @ObservationIgnored private var isInstalled = false
     @ObservationIgnored private var wasTrustedAtInstall = false
     @ObservationIgnored private var retries = 0
+    /// Replacement can be on before anyone touched the toggle, so the prompt is offered once a launch.
+    @ObservationIgnored private var hasPrompted = false
     @ObservationIgnored private var work: (any ScheduledWork)?
 
     init(tap: any LevelKeyTapping, permission: any AccessibilityPermission, engine: LevelKeyEngine,
@@ -75,6 +77,10 @@ final class LevelKeyService {
         } else if !isInstalled, changed || status == .off {
             retries = 0
             install()
+            if status == .needsPermission, !hasPrompted {
+                hasPrompted = true
+                requestPermission()
+            }
         }
     }
 

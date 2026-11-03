@@ -71,6 +71,14 @@ final class ActivityManager {
         publish()
     }
 
+    /// The session is locked or away: nothing shows, and nothing private is kept for later.
+    func setSuppressed(_ suppressed: Bool) {
+        queue.setSuppressed(suppressed, at: scheduler.now)
+        publish()
+    }
+
+    var isSuppressed: Bool { queue.isSuppressed }
+
     /// A control is being dragged: nothing but a critical alert may change what's on screen.
     func setInteracting(_ interacting: Bool) {
         queue.setInteracting(interacting, at: scheduler.now)
