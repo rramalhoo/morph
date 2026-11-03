@@ -12,7 +12,7 @@ struct LiveWaveformView: View {
     @Environment(\.morphMotion) private var motion
 
     var body: some View {
-        if waveform.showsRealLevels {
+        if waveform.showsRealLevels, !motion.reduced {
             WaveformBars(levels: waveform.levels, color: accent)
                 .frame(width: Self.width, height: Self.height)
         } else if preferences.waveformFallback == .decorative, !motion.reduced {

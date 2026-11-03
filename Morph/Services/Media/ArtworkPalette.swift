@@ -12,6 +12,11 @@ struct AmbientColor: Equatable, Sendable {
     var color: Color { Color(red: red, green: green, blue: blue) }
 }
 
+struct AmbientPalette: Equatable, Sendable {
+    var primary: AmbientColor
+    var secondary: AmbientColor?
+}
+
 /// Finds the color a cover reads as: the strongest hue, not the average, which is nearly always
 /// mud. Monochrome covers have no such color, and then there's no glow rather than a grey one.
 enum ArtworkPalette {
@@ -21,8 +26,19 @@ enum ArtworkPalette {
     private static let minimumBrightness = 0.12
     /// Below this share of the image, a color is an accent and not what the cover looks like.
     private static let minimumCoverage = 0.04
+    /// In bins, so about 60 degrees: anything closer is the same color to the eye.
+    private static let minimumHueDistance = 4
+
+    static func palette(in data: Data) -> AmbientPalette? {
+        guard let pixels = pixels(of: data) else { return nil }
+        return palette(rgba: pixels)
+    }
 
     static func dominantColor(in data: Data) -> AmbientColor? {
+        palette(in: data)?.primary
+    }
+
+    private static func pixels(of data: Data) -> [UInt8]? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -38,10 +54,15 @@ enum ArtworkPalette {
             context.draw(image, in: CGRect(x: 0, y: 0, width: thumbnailSize, height: thumbnailSize))
             return true
         }
-        return drew ? dominantColor(rgba: pixels) : nil
+        return drew ? pixels : nil
     }
 
     static func dominantColor(rgba pixels: [UInt8]) -> AmbientColor? {
+        palette(rgba: pixels)?.primary
+    }
+
+    /// The strongest hue, and the next one far enough around the wheel to read as a second color.
+    static func palette(rgba pixels: [UInt8]) -> AmbientPalette? {
         var weights = [Double](repeating: 0, count: hueBins)
         var totals = [(red: Double, green: Double, blue: Double)](repeating: (0, 0, 0), count: hueBins)
         var counted = [Int](repeating: 0, count: hueBins)
@@ -65,11 +86,20 @@ enum ArtworkPalette {
 
         guard let best = weights.indices.max(by: { weights[$0] < weights[$1] }), weights[best] > 0,
               Double(counted[best]) / Double(pixelCount) >= minimumCoverage else { return nil }
-        let (hue, saturation, brightness) = hsb(totals[best].red / weights[best],
-                                                totals[best].green / weights[best],
-                                                totals[best].blue / weights[best])
-        // Held to a calm range, so a loud cover can't turn into neon against the black.
-        return rgb(hue, min(saturation, 0.7), min(max(brightness, 0.6), 0.85))
+
+        func color(_ bin: Int) -> AmbientColor {
+            let (hue, saturation, brightness) = hsb(totals[bin].red / weights[bin],
+                                                    totals[bin].green / weights[bin],
+                                                    totals[bin].blue / weights[bin])
+            // Held to a calm range, so a loud cover can't turn into neon against the black.
+            return rgb(hue, min(saturation, 0.7), min(max(brightness, 0.6), 0.85))
+        }
+        let others = weights.indices.filter { bin in
+            let distance = abs(bin - best)
+            return min(distance, hueBins - distance) >= minimumHueDistance && weights[bin] > 0
+                && Double(counted[bin]) / Double(pixelCount) >= minimumCoverage
+        }
+        return AmbientPalette(primary: color(best), secondary: others.max { weights[$0] < weights[$1] }.map(color))
     }
 
     private static func hsb(_ red: Double, _ green: Double, _ blue: Double) -> (Double, Double, Double) {
@@ -113,35 +143,36 @@ enum ArtworkPalette {
 final class AmbientColorService {
     private static let cacheLimit = 40
 
-    private(set) var color: AmbientColor?
+    private(set) var palette: AmbientPalette?
+    var color: AmbientColor? { palette?.primary }
 
-    @ObservationIgnored private var cache: [String: AmbientColor?] = [:]
+    @ObservationIgnored private var cache: [String: AmbientPalette?] = [:]
     @ObservationIgnored private var cacheOrder: [String] = []
     @ObservationIgnored private var currentKey: String?
 
     func update(key: String?, artwork: Data?) {
         guard let key, let artwork else {
             currentKey = nil
-            color = nil
+            palette = nil
             return
         }
         guard key != currentKey else { return }
         currentKey = key
 
         if let cached = cache[key] {
-            color = cached
+            palette = cached
             return
         }
         Task { [weak self] in
-            let result = await Task.detached(priority: .utility) { ArtworkPalette.dominantColor(in: artwork) }.value
+            let result = await Task.detached(priority: .utility) { ArtworkPalette.palette(in: artwork) }.value
             self?.store(result, key: key)
         }
     }
 
-    private func store(_ result: AmbientColor?, key: String) {
+    private func store(_ result: AmbientPalette?, key: String) {
         cache[key] = .some(result)
         cacheOrder.append(key)
         if cacheOrder.count > Self.cacheLimit { cache[cacheOrder.removeFirst()] = nil }
-        if key == currentKey { color = result }
+        if key == currentKey { palette = result }
     }
 }

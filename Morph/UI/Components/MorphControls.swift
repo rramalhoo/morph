@@ -5,6 +5,8 @@ struct MorphIconButton: View {
     let symbol: String
     let label: String
     var size: CGFloat = 14
+    /// Narrower than the usual target where several must share a tight space.
+    var width: CGFloat = MorphSize.hitTarget
     var isSelected = false
     let action: () -> Void
 
@@ -15,7 +17,7 @@ struct MorphIconButton: View {
             Image(systemName: symbol)
                 .font(.system(size: size, weight: .semibold))
                 .foregroundStyle(isSelected ? MorphColor.textPrimary : MorphColor.textSecondary)
-                .frame(width: MorphSize.hitTarget, height: MorphSize.hitTarget)
+                .frame(width: width, height: MorphSize.hitTarget)
                 .background(
                     RoundedRectangle(cornerRadius: MorphRadius.small, style: .continuous)
                         .fill(isSelected || isHovering ? MorphColor.surfaceSecondary : .clear)
@@ -58,6 +60,8 @@ struct MorphProgressBar: View {
     /// Called continuously during a drag, for values that apply live.
     var onDrag: ((Double) -> Void)?
     var onSeek: ((Double) -> Void)?
+    /// Where a drag currently is, or nil when it ends, for labels beside the bar.
+    var onPreview: ((Double?) -> Void)?
 
     @Environment(\.morphAccent) private var accent
     @Environment(\.morphMotion) private var motion
@@ -86,14 +90,31 @@ struct MorphProgressBar: View {
                 if dragFraction == nil { onScrub?(true) }
                 let fraction = (value.location.x / width).clamped(to: 0...1)
                 dragFraction = fraction
+                onPreview?(fraction)
                 onDrag?(fraction)
             }
             .onEnded { _ in
                 guard let dragFraction else { return }
                 onSeek?(dragFraction)
                 onScrub?(false)
+                onPreview?(nil)
                 self.dragFraction = nil
             }
+    }
+}
+
+/// Decoding a cover takes real time, and this view's body runs often. One cover shows at a time, so
+/// remembering the last one is enough.
+@MainActor
+private enum ArtworkDecoder {
+    private static var last: (data: Data, image: NSImage)?
+
+    static func image(for data: Data?) -> NSImage? {
+        guard let data else { return nil }
+        if let last, last.data == data { return last.image }
+        guard let image = NSImage(data: data) else { return nil }
+        last = (data, image)
+        return image
     }
 }
 
@@ -107,9 +128,10 @@ struct ArtworkView: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: radius, style: .continuous).fill(MorphColor.surfaceSecondary)
-            if let data, let image = NSImage(data: data) {
+            if let image = ArtworkDecoder.image(for: data) {
                 Image(nsImage: image)
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
                     .transition(.opacity)
             } else {
@@ -129,12 +151,18 @@ struct ArtworkView: View {
 struct MorphCard<Content: View>: View {
     /// An ambient light in the corner of the card. The surface itself never changes color.
     var tint: Color?
+    /// A second light from the far corner, for covers with two colors.
+    var secondaryTint: Color?
+    /// Lets the light drift slowly, while there's something alive to show.
+    var isAnimated = false
     @ViewBuilder let content: Content
 
     @Environment(\.morphMotion) private var motion
 
-    init(tint: Color? = nil, @ViewBuilder content: () -> Content) {
+    init(tint: Color? = nil, secondaryTint: Color? = nil, isAnimated: Bool = false, @ViewBuilder content: () -> Content) {
         self.tint = tint
+        self.secondaryTint = secondaryTint
+        self.isAnimated = isAnimated
         self.content = content()
     }
 
@@ -145,11 +173,29 @@ struct MorphCard<Content: View>: View {
             .background {
                 ZStack {
                     RoundedRectangle(cornerRadius: MorphRadius.card, style: .continuous).fill(MorphColor.surface)
-                    RoundedRectangle(cornerRadius: MorphRadius.card, style: .continuous)
-                        .fill(RadialGradient(colors: [(tint ?? .clear).opacity(tint == nil ? 0 : 0.2), .clear],
-                                             center: .topLeading, startRadius: 0, endRadius: 280))
-                        .animation(motion.artwork, value: tint)
+                    if isAnimated, !motion.reduced, tint != nil {
+                        // A slow timeline: the panel is the only place this runs, and only while open.
+                        TimelineView(.animation(minimumInterval: 1.0 / 15)) { context in
+                            glow(phase: context.date.timeIntervalSinceReferenceDate / 9)
+                        }
+                    } else {
+                        glow(phase: 0)
+                    }
                 }
+                .clipShape(RoundedRectangle(cornerRadius: MorphRadius.card, style: .continuous))
+                .animation(motion.artwork, value: tint)
             }
+    }
+
+    private func glow(phase: Double) -> some View {
+        ZStack {
+            RadialGradient(colors: [(tint ?? .clear).opacity(tint == nil ? 0 : 0.2), .clear],
+                           center: UnitPoint(x: 0.1 * sin(phase), y: 0.1 * cos(phase)), startRadius: 0, endRadius: 280)
+            if let secondaryTint {
+                RadialGradient(colors: [secondaryTint.opacity(0.1), .clear],
+                               center: UnitPoint(x: 1 - 0.12 * cos(phase * 0.7), y: 1 - 0.12 * sin(phase * 0.7)),
+                               startRadius: 0, endRadius: 220)
+            }
+        }
     }
 }

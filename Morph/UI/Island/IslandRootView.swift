@@ -106,6 +106,8 @@ private struct IslandContentView: View {
             DropTargetView(notch: notch)
         case .activity(let activity) where activity.presentation == .level:
             LevelHUDView(content: activity.content, notch: notch, inset: inset, size: size)
+        case .activity(let activity) where activity.presentation == .screenshot:
+            ScreenshotPreviewView(notch: notch, inset: inset)
         case .activity(let activity):
             ActivityView(activity: activity, notch: notch, inset: inset)
         case .expanded(let tab):

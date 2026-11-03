@@ -40,6 +40,8 @@ final class BrightnessService {
     private static let readDelay = Duration.milliseconds(120)
 
     var onChange: ((_ increased: Bool, _ percentage: Int?) -> Void)?
+    /// A volume key reached macOS. At 0% or 100% nothing changes, so no listener would fire.
+    var onVolumeKey: (() -> Void)?
 
     /// Swapped for the private reading only while the user has opted into replacing the HUD.
     var reader: any BrightnessReading
@@ -74,7 +76,11 @@ final class BrightnessService {
     }
 
     func handle(subtype: Int16, data1: Int) {
-        guard let press = LevelKeyPress(subtype: subtype, data1: data1), press.isDown, press.key.isBrightness else { return }
+        guard let press = LevelKeyPress(subtype: subtype, data1: data1), press.isDown else { return }
+        guard press.key.isBrightness else {
+            onVolumeKey?()
+            return
+        }
         let increased = press.key == .brightnessUp
         readWork?.cancel()
         readWork = scheduler.schedule(after: Self.readDelay) { [weak self] in

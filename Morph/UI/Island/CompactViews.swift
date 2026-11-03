@@ -27,6 +27,8 @@ struct LiveCompactView: View {
 
     @Environment(MediaController.self) private var media
     @Environment(TimerService.self) private var timers
+    @Environment(FocusService.self) private var focus
+    @Environment(LiveActivityStore.self) private var external
     @Environment(\.morphAccent) private var accent
 
     var body: some View {
@@ -50,6 +52,14 @@ struct LiveCompactView: View {
             Image(systemName: "timer").foregroundStyle(accent).font(MorphFont.compact)
         case .stopwatch:
             Image(systemName: "stopwatch").foregroundStyle(accent).font(MorphFont.compact)
+        case .focus:
+            Image(systemName: focus.session.phase.symbol)
+                .foregroundStyle(focus.session.timer.isPaused ? MorphColor.textSecondary : accent)
+                .font(MorphFont.compact)
+        case .external:
+            Image(systemName: external.featured?.symbol ?? "dot.radiowaves.left.and.right")
+                .foregroundStyle(accent)
+                .font(MorphFont.compact)
         }
     }
 
@@ -72,6 +82,31 @@ struct LiveCompactView: View {
                     .foregroundStyle(MorphColor.textPrimary)
                     .fixedSize()
             }
+        case .focus:
+            TimelineView(.periodic(from: .now, by: focus.session.timer.isRunning ? 1 : 3600)) { _ in
+                HStack(spacing: MorphSpacing.xs) {
+                    ProgressRing(fraction: focus.session.fraction(at: focus.now), color: accent)
+                    Text(TimeFormat.countdown(focus.session.timer.remaining(at: focus.now).timeInterval))
+                        .font(MorphFont.compact)
+                        .foregroundStyle(focus.session.timer.isPaused ? MorphColor.textSecondary : MorphColor.textPrimary)
+                        .fixedSize()
+                }
+            }
+        case .external:
+            if let progress = external.featured?.progress {
+                HStack(spacing: MorphSpacing.xs) {
+                    ProgressRing(fraction: progress, color: accent)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(MorphFont.compact)
+                        .foregroundStyle(MorphColor.textPrimary)
+                        .fixedSize()
+                }
+            } else {
+                Text(external.featured?.title ?? "")
+                    .font(MorphFont.compact)
+                    .foregroundStyle(MorphColor.textPrimary)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -80,7 +115,30 @@ struct LiveCompactView: View {
         case .media: media.snapshot?.track.map { "Now playing \($0.title) by \($0.artist)" } ?? "Now playing"
         case .timer: "Timer running"
         case .stopwatch: "Stopwatch running"
+        case .focus: "\(focus.session.phase.title) running"
+        case .external: external.featured?.title ?? "Activity running"
         }
+    }
+}
+
+/// How far along something is, small enough to sit beside the notch.
+struct ProgressRing: View {
+    let fraction: Double
+    let color: Color
+
+    @Environment(\.morphMotion) private var motion
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(MorphColor.surfaceSecondary, lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: fraction.clamped(to: 0...1))
+                .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(motion.progress, value: fraction)
+        }
+        .frame(width: 12, height: 12)
+        .accessibilityHidden(true)
     }
 }
 
@@ -193,8 +251,10 @@ struct ActivityView: View {
     private var tint: Color {
         switch content {
         case .batteryCritical: MorphColor.critical
-        case .batteryLow, .actionFailed: MorphColor.warning
+        case .batteryLow, .actionFailed, .peripheralLow: MorphColor.warning
         case .powerConnected, .fullyCharged, .deviceConnected: MorphColor.positive
+        case .external(let external) where external.state == .failed: MorphColor.warning
+        case .external(let external) where external.state == .success: MorphColor.positive
         default: accent
         }
     }
@@ -202,7 +262,7 @@ struct ActivityView: View {
     var body: some View {
         Group {
             switch activity.presentation {
-            case .minimal, .level:
+            case .minimal, .level, .screenshot:
                 NotchEars(notch: notch, inset: inset) {
                     HStack(spacing: MorphSpacing.xs + 2) {
                         Image(systemName: content.symbol)

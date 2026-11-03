@@ -22,6 +22,9 @@ struct ExpandedPanelView: View {
                 switch tab {
                 case .home: HomeTabView(artworkSpace: artworkSpace)
                 case .timers: TimersTabView()
+                case .focus: FocusTabView()
+                case .battery: BatteryTabView()
+                case .activities: ActivitiesTabView()
                 case .shelf: ShelfTabView()
                 }
             }
@@ -35,11 +38,19 @@ struct ExpandedPanelView: View {
         .animation(motion.contentCrossfade, value: activities.current?.presentation == .level)
     }
 
+    /// Tabs share the space left of the notch, which they must never reach.
+    private var tabWidth: CGFloat {
+        let panel = island.layout.islandSize(for: .expanded(tab)).width
+        let ear = (panel - 2 * (inset + MorphSpacing.s) - notch.width) / 2
+        let count = CGFloat(island.availableTabs.count)
+        return min(MorphSize.hitTarget, (ear - MorphSpacing.xxs * (count - 1)) / count)
+    }
+
     private var header: some View {
         NotchEars(notch: notch, inset: 0) {
-            HStack(spacing: MorphSpacing.xs) {
+            HStack(spacing: MorphSpacing.xxs) {
                 ForEach(island.availableTabs) { candidate in
-                    MorphIconButton(symbol: candidate.symbol, label: candidate.title, size: 12,
+                    MorphIconButton(symbol: candidate.symbol, label: candidate.title, size: 12, width: tabWidth,
                                     isSelected: candidate == tab) {
                         island.showTab(candidate)
                     }

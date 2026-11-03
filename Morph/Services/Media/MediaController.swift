@@ -48,6 +48,9 @@ final class MediaController {
         self.scheduler = scheduler
     }
 
+    /// The clock positions are measured on. Taken from the scheduler, so seeks and tests agree.
+    var now: ContinuousClock.Instant { scheduler.now }
+
     /// The provider that needs the user's permission before it can be shown, if any.
     var providerNeedingAuthorization: MediaProviderKind? {
         activeProviders.map(\.kind).first { availability[$0] == .needsAuthorization }
@@ -189,7 +192,16 @@ final class MediaController {
     func nextTrack() { perform { try await $0.nextTrack() } }
     func previousTrack() { perform { try await $0.previousTrack() } }
 
+    /// Sent once, when the drag ends. The position moves at once, and the refresh after the command
+    /// reconciles it with what the player actually did.
     func seek(to position: TimeInterval) {
+        guard var latest = snapshot, latest.canSeek else { return }
+        // A refresh already on its way read the old position, and must not put it back.
+        refreshGeneration += 1
+        refreshWork?.cancel()
+        latest.position = max(0, position)
+        latest.capturedAt = scheduler.now
+        snapshot = latest
         perform { try await $0.seek(to: position) }
     }
 

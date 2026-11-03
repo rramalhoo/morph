@@ -36,9 +36,15 @@ private struct NowPlayingCard: View {
     @Environment(VolumeService.self) private var output
     @Environment(AmbientColorService.self) private var ambient
     @Environment(IslandController.self) private var island
+    @Environment(MorphPreferences.self) private var preferences
+    /// Where a drag on the bar is, so the time beside it follows the finger.
+    @State private var scrubFraction: Double?
+
+    private var isPro: Bool { preferences.nowPlayingPro }
 
     var body: some View {
-        MorphCard(tint: ambient.color?.color) {
+        MorphCard(tint: ambient.color?.color, secondaryTint: isPro ? ambient.palette?.secondary?.color : nil,
+                  isAnimated: isPro && snapshot.isPlaying) {
             VStack(alignment: .leading, spacing: MorphSpacing.s) {
                 HStack(spacing: MorphSpacing.m) {
                     ArtworkView(data: media.artwork, size: MorphSize.artwork)
@@ -50,9 +56,11 @@ private struct NowPlayingCard: View {
                         Text(track.artist)
                             .font(MorphFont.secondary)
                             .foregroundStyle(MorphColor.textSecondary)
-                        Text(track.album)
-                            .font(MorphFont.secondary)
-                            .foregroundStyle(MorphColor.textSecondary.opacity(0.7))
+                        if !track.album.isEmpty {
+                            Text(track.album)
+                                .font(MorphFont.secondary)
+                                .foregroundStyle(MorphColor.textSecondary.opacity(0.7))
+                        }
                     }
                     .lineLimit(1)
                     .accessibilityElement(children: .combine)
@@ -64,21 +72,30 @@ private struct NowPlayingCard: View {
         }
     }
 
+    private var canSeek: Bool { preferences.progressControls && snapshot.canSeek }
+
     @ViewBuilder
     private var progress: some View {
         if let duration = track.duration {
             // Ticks only while playing and only while this view exists, which is while expanded.
             TimelineView(.periodic(from: .now, by: snapshot.isPlaying ? 1 : 3600)) { _ in
-                let position = snapshot.position(at: .now) ?? 0
+                let position = snapshot.position(at: media.now) ?? 0
+                let shown = scrubFraction.map { $0 * duration } ?? position
                 HStack(spacing: MorphSpacing.s) {
-                    Text(TimeFormat.clock(position)).frame(width: 34, alignment: .leading)
+                    Text(TimeFormat.clock(shown)).frame(width: 34, alignment: .leading)
                     MorphProgressBar(
                         fraction: duration > 0 ? position / duration : 0,
                         onScrub: { island.send($0 ? .interactionBegan : .interactionEnded) },
-                        onSeek: { media.seek(to: $0 * duration) }
+                        onSeek: canSeek ? { media.seek(to: $0 * duration) } : nil,
+                        onPreview: { scrubFraction = $0 }
                     )
+                    .accessibilityElement()
                     .accessibilityLabel("Playback position")
-                    .accessibilityValue("\(TimeFormat.clock(position)) of \(TimeFormat.clock(duration))")
+                    .accessibilityValue("\(TimeFormat.clock(shown)) of \(TimeFormat.clock(duration))")
+                    .accessibilityAdjustableAction { direction in
+                        guard canSeek else { return }
+                        media.seek(to: (position + (direction == .increment ? 10 : -10)).clamped(to: 0...duration))
+                    }
                     Text(TimeFormat.clock(duration)).frame(width: 34, alignment: .trailing)
                 }
                 .font(MorphFont.label.monospacedDigit())

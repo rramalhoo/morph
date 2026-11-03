@@ -265,8 +265,10 @@ final class NotchWindowController {
     private func handleGlobalMouse(isDragging: Bool) {
         guard isDragging else {
             if island.isFileDragActive { island.isFileDragActive = false }
+            if island.isExportingDrag { island.isExportingDrag = false }
             return
         }
+        guard !island.isExportingDrag else { return }
         let pasteboard = NSPasteboard(name: .drag)
         guard pasteboard.changeCount != lastDragChangeCount else { return }
         lastDragChangeCount = pasteboard.changeCount

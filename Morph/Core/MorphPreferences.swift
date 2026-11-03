@@ -10,6 +10,10 @@ final class MorphPreferences {
     nonisolated static let sensitivityRange: ClosedRange<Double> = 0.5...2.0
     nonisolated static let hudDurationRange: ClosedRange<Double> = 0.6...3.0
     nonisolated static let defaultHUDDuration = 1.2
+    nonisolated static let screenshotDurationRange: ClosedRange<Double> = 3.0...20.0
+    nonisolated static let liveAPIPortRange: ClosedRange<Int> = 1024...65535
+    nonisolated static let defaultLiveAPIPort = 47_800
+    nonisolated static let deviceRefreshRange: ClosedRange<Int> = 1...30
 
     private enum Key: String, CaseIterable {
         case isEnabled, showMenuBarIcon, showDockIcon
@@ -25,6 +29,12 @@ final class MorphPreferences {
         case volumeIndicator, brightnessIndicator, activityDuration
         case replaceVolumeHUD, volumeShowsPercentage, volumeHUDDuration
         case replaceBrightnessHUD, brightnessShowsPercentage, brightnessHUDDuration
+        case waveDiagnostics, nowPlayingPro, progressControls
+        case screenshotPreviews, screenshotFolder, screenshotDuration
+        case liveAPIEnabled, liveAPIPort
+        case focusEnabled, focusMinutes, shortBreakMinutes, longBreakMinutes, focusCycles
+        case focusNotifications, focusAutoBreak
+        case batteryAudioDevices, peripheralAlerts, deviceRefreshMinutes
     }
 
     // General
@@ -74,6 +84,31 @@ final class MorphPreferences {
     var replaceBrightnessHUD = false { didSet { store(replaceBrightnessHUD, .replaceBrightnessHUD) } }
     var brightnessShowsPercentage = true { didSet { store(brightnessShowsPercentage, .brightnessShowsPercentage) } }
     var brightnessHUDDuration = MorphPreferences.defaultHUDDuration { didSet { store(brightnessHUDDuration, .brightnessHUDDuration) } }
+
+    var waveDiagnostics = false { didSet { store(waveDiagnostics, .waveDiagnostics) } }
+    var nowPlayingPro = true { didSet { store(nowPlayingPro, .nowPlayingPro) } }
+    var progressControls = true { didSet { store(progressControls, .progressControls) } }
+    var screenshotPreviews = false { didSet { store(screenshotPreviews, .screenshotPreviews) } }
+    /// A security-scoped bookmark of the one folder Morph may watch.
+    var screenshotFolder: Data? {
+        didSet {
+            guard !isLoading else { return }
+            defaults.set(screenshotFolder, forKey: Key.screenshotFolder.rawValue)
+        }
+    }
+    var screenshotDuration = 6.0 { didSet { store(screenshotDuration, .screenshotDuration) } }
+    var liveAPIEnabled = false { didSet { store(liveAPIEnabled, .liveAPIEnabled) } }
+    var liveAPIPort = MorphPreferences.defaultLiveAPIPort { didSet { store(liveAPIPort, .liveAPIPort) } }
+    var focusEnabled = true { didSet { store(focusEnabled, .focusEnabled) } }
+    var focusMinutes = 25 { didSet { store(focusMinutes, .focusMinutes) } }
+    var shortBreakMinutes = 5 { didSet { store(shortBreakMinutes, .shortBreakMinutes) } }
+    var longBreakMinutes = 15 { didSet { store(longBreakMinutes, .longBreakMinutes) } }
+    var focusCycles = 4 { didSet { store(focusCycles, .focusCycles) } }
+    var focusNotifications = false { didSet { store(focusNotifications, .focusNotifications) } }
+    var focusAutoBreak = true { didSet { store(focusAutoBreak, .focusAutoBreak) } }
+    var batteryAudioDevices = true { didSet { store(batteryAudioDevices, .batteryAudioDevices) } }
+    var peripheralAlerts = false { didSet { store(peripheralAlerts, .peripheralAlerts) } }
+    var deviceRefreshMinutes = 5 { didSet { store(deviceRefreshMinutes, .deviceRefreshMinutes) } }
 
     // Advanced
     var selectedDisplay = MorphPreferences.automaticDisplay { didSet { store(selectedDisplay, .selectedDisplay) } }
@@ -141,9 +176,31 @@ final class MorphPreferences {
         replaceBrightnessHUD = bool(.replaceBrightnessHUD, default: false)
         brightnessShowsPercentage = bool(.brightnessShowsPercentage, default: true)
         brightnessHUDDuration = hudDuration(.brightnessHUDDuration)
+        waveDiagnostics = bool(.waveDiagnostics, default: false)
+        nowPlayingPro = bool(.nowPlayingPro, default: true)
+        progressControls = bool(.progressControls, default: true)
+        screenshotPreviews = bool(.screenshotPreviews, default: false)
+        screenshotFolder = defaults.data(forKey: Key.screenshotFolder.rawValue)
+        screenshotDuration = (defaults.object(forKey: Key.screenshotDuration.rawValue) as? Double ?? 6).clamped(to: Self.screenshotDurationRange)
+        liveAPIEnabled = bool(.liveAPIEnabled, default: false)
+        liveAPIPort = (defaults.object(forKey: Key.liveAPIPort.rawValue) as? Int ?? Self.defaultLiveAPIPort).clamped(to: Self.liveAPIPortRange)
+        focusEnabled = bool(.focusEnabled, default: true)
+        focusMinutes = minutes(.focusMinutes, default: 25)
+        shortBreakMinutes = minutes(.shortBreakMinutes, default: 5)
+        longBreakMinutes = minutes(.longBreakMinutes, default: 15)
+        focusCycles = (defaults.object(forKey: Key.focusCycles.rawValue) as? Int ?? 4).clamped(to: 2...8)
+        focusNotifications = bool(.focusNotifications, default: false)
+        focusAutoBreak = bool(.focusAutoBreak, default: true)
+        batteryAudioDevices = bool(.batteryAudioDevices, default: true)
+        peripheralAlerts = bool(.peripheralAlerts, default: false)
+        deviceRefreshMinutes = (defaults.object(forKey: Key.deviceRefreshMinutes.rawValue) as? Int ?? 5).clamped(to: Self.deviceRefreshRange)
         selectedDisplay = defaults.string(forKey: Key.selectedDisplay.rawValue) ?? Self.automaticDisplay
         calibration = json(.calibration) ?? .zero
         quickActions = json(.quickActions) ?? QuickAction.defaults
+    }
+
+    private func minutes(_ key: Key, default fallback: Int) -> Int {
+        (defaults.object(forKey: key.rawValue) as? Int ?? fallback).clamped(to: 1...180)
     }
 
     private func hudDuration(_ key: Key) -> Double {

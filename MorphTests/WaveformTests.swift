@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import os
 @testable import Morph
 
 private func tone(_ frequency: Float, amplitude: Float = 0.4, sampleRate: Float = 48_000, offset: Int = 0) -> [Float] {
@@ -158,7 +159,7 @@ struct WaveformServiceTests {
     }
 
     private func settle() async {
-        for _ in 0..<5 { await Task.yield() }
+        try? await Task.sleep(for: .milliseconds(20))
     }
 
     private func publish(_ levels: [Float] = [0.5, 0.6, 0.9, 0.6, 0.4], signal: Bool = true) async {
@@ -166,38 +167,123 @@ struct WaveformServiceTests {
         await settle()
     }
 
+    /// Runs a watchdog round and lets its answer land.
+    private func checkHealth() async {
+        scheduler.advance(by: .seconds(2))
+        await settle()
+    }
+
     @Test func noRealBarsAreClaimedBeforeRealAudioArrives() async {
         let service = await started()
-        #expect(service.status == .connecting)
+        #expect(service.state == .requestingPermission)
         #expect(!service.showsRealLevels)
         await publish()
+        #expect(service.state == .capturing)
         #expect(service.showsRealLevels)
         #expect(service.levels[2] == 0.9)
     }
 
-    @Test func onlyDigitalSilenceMeansNoSignalAndCaptureStops() async {
+    /// The bug behind bars that stopped for good: hovering or a passing HUD ended the demand for a
+    /// moment, and everything the still-running capture sent afterwards was dropped as stale.
+    @Test func barsKeepFollowingAfterAShortGap() async {
         let service = await started()
-        await publish([0.12, 0.12, 0.12, 0.12, 0.12], signal: false)
-        scheduler.advance(by: .seconds(3))
-        await settle()
-        #expect(service.status == .noSignal)
+        await publish()
+        service.update(demand: nil)
+        scheduler.advance(by: .seconds(1))
+        service.update(demand: demand)
+        await publish([0.3, 0.4, 0.8, 0.4, 0.3])
+        #expect(service.levels[2] == 0.8)
+        #expect(capture.startCount == 1)
+    }
+
+    @Test func aQuietPassageIsNotAFailure() async {
+        let service = await started()
+        await publish()
+        for round in 1...30 {
+            capture.health.bufferCount = UInt64(round + 1)
+            await publish([0.12, 0.12, 0.12, 0.12, 0.12], signal: false)
+            await checkHealth()
+        }
+        #expect(service.state == .capturing, "A minute of silence, with buffers arriving")
+        #expect(capture.startCount == 1)
+        #expect(capture.stopCount == 0)
+        #expect(!service.hasSignal)
+        #expect(service.showsRealLevels, "The bars stay and settle, rather than turning into the icon")
+    }
+
+    @Test func onlySilenceFromTheStartGivesUpUntilTheTrackChanges() async {
+        let service = await started()
+        for round in 1...11 {
+            capture.health.bufferCount = UInt64(round + 1)
+            await publish([0.12, 0.12, 0.12, 0.12, 0.12], signal: false)
+            await checkHealth()
+        }
+        #expect(service.state == .unavailable)
         #expect(!service.showsRealLevels)
         #expect(capture.stopCount == 1, "Denied permission must not leave a tap running")
+        #expect(service.lastError?.contains("permission") == true)
 
         service.update(demand: demand)
         #expect(capture.startCount == 1, "Same track: don't hammer the tap")
         var next = demand
         next.trackID = "2"
-        service.update(demand: nil)
-        scheduler.advance(by: .seconds(6))
         service.update(demand: next)
         #expect(capture.startCount == 2, "A new track retries")
     }
 
-    @Test func startFailureIsReported() async {
+    @Test func aStalledCaptureRecoversWithBackoff() async {
+        let service = await started()
+        await publish()
+        // The health count starts at 1 and never moves.
+        await checkHealth()
+        await checkHealth()
+        await checkHealth()
+        #expect(service.state == .recovering)
+        #expect(service.recoveries == 1)
+        #expect(capture.stopCount == 1)
+        scheduler.advance(by: .milliseconds(500))
+        await settle()
+        #expect(capture.startCount == 2)
+        #expect(service.state == .capturing)
+    }
+
+    @Test func aPlayerThatMovedProcessesIsFollowedWithoutCountingAsAFailure() async {
+        let service = await started()
+        await publish()
+        capture.health.followsPlayer = false
+        for round in 1...4 {
+            capture.health.bufferCount = UInt64(round + 1)
+            await checkHealth()
+        }
+        #expect(capture.startCount == 2)
+        #expect(service.recoveries == 0)
+    }
+
+    @Test func aFailedStartIsRetriedThenGivenUpOn() async {
         capture.startError = .noPlayerProcess
         let service = await started()
-        #expect(service.status == .unavailable)
+        #expect(service.state == .recovering)
+        for attempt in 1..<WaveCaptureMachine.maximumAttempts {
+            scheduler.advance(by: WaveCaptureMachine.delay(forAttempt: attempt))
+            await settle()
+        }
+        #expect(service.state == .unavailable)
+        #expect(capture.startCount == WaveCaptureMachine.maximumAttempts)
+        #expect(service.lastError != nil)
+    }
+
+    @Test func anUnsupportedSystemIsNotRetried() async {
+        capture.startError = .unsupportedSystem
+        let service = await started()
+        #expect(service.state == .unavailable)
+        #expect(capture.startCount == 1)
+    }
+
+    @Test func demandingTwiceStartsOnce() async {
+        let service = await started()
+        service.update(demand: demand)
+        service.update(demand: demand)
+        #expect(capture.startCount == 1)
     }
 
     @Test func aNewTrackDoesNotRestartARunningTap() async {
@@ -214,6 +300,7 @@ struct WaveformServiceTests {
         next.outputUID = "airpods"
         service.update(demand: next)
         #expect(capture.startCount == 2)
+        #expect(capture.stopCount == 1)
     }
 
     @Test func pausingFadesToRestThenStopsCapture() async {
@@ -224,7 +311,9 @@ struct WaveformServiceTests {
         #expect(abs(service.levels[2] - WaveformBarMapper.restLevel) < 0.03)
         #expect(capture.stopCount == 0, "A short gap keeps the tap")
         scheduler.advance(by: .seconds(4))
+        await settle()
         #expect(capture.stopCount == 1)
+        #expect(service.state == .stopped)
         #expect(scheduler.pendingCount == 0, "Nothing keeps ticking once still")
     }
 
@@ -234,9 +323,11 @@ struct WaveformServiceTests {
         service.update(demand: nil)
         scheduler.advance(by: .seconds(2))
         service.update(demand: demand)
-        scheduler.advance(by: .seconds(10))
+        capture.health.bufferCount = 2
+        await settle()
         #expect(capture.startCount == 1)
         #expect(capture.stopCount == 0)
+        _ = service
     }
 
     @Test func lateLevelsFromAStoppedSessionAreIgnored() async {
@@ -248,6 +339,101 @@ struct WaveformServiceTests {
         await publish()
         #expect(service.levels == settled)
         #expect(!service.isCapturing)
+    }
+
+    @Test func wakingFromSleepStartsCleanly() async {
+        let service = await started()
+        await publish()
+        service.stopNow()
+        #expect(service.state == .stopped)
+        service.update(demand: demand)
+        await settle()
+        #expect(capture.startCount == 2)
+        #expect(service.state == .capturing, "Sound was heard before, so permission isn't in question")
+    }
+}
+
+@Suite("Wave capture machine")
+struct WaveCaptureMachineTests {
+    @Test func startingIsIdempotentInEveryRunningState() {
+        var machine = WaveCaptureMachine()
+        #expect(machine.handle(.demanded) == [.startCapture])
+        #expect(machine.handle(.demanded).isEmpty)
+        _ = machine.handle(.started)
+        #expect(machine.handle(.demanded).isEmpty)
+        _ = machine.handle(.heardSignal)
+        #expect(machine.handle(.demanded).isEmpty)
+    }
+
+    @Test func backoffGrowsAndIsCapped() {
+        #expect(WaveCaptureMachine.delay(forAttempt: 1) == .milliseconds(500))
+        #expect(WaveCaptureMachine.delay(forAttempt: 2) == .seconds(1))
+        #expect(WaveCaptureMachine.delay(forAttempt: 3) == .seconds(2))
+        #expect(WaveCaptureMachine.delay(forAttempt: 50) == .seconds(30))
+    }
+
+    @Test func recoveryStopsTryingEventually() {
+        var machine = WaveCaptureMachine()
+        _ = machine.handle(.demanded)
+        var starts = 1
+        while machine.state != .unavailable {
+            _ = machine.handle(.startFailed(retryable: true))
+            if machine.state == .recovering {
+                _ = machine.handle(.retryElapsed)
+                starts += 1
+            }
+            #expect(starts <= WaveCaptureMachine.maximumAttempts)
+        }
+    }
+
+    @Test func realSoundClearsTheFailureCount() {
+        var machine = WaveCaptureMachine()
+        _ = machine.handle(.demanded)
+        _ = machine.handle(.startFailed(retryable: true))
+        _ = machine.handle(.retryElapsed)
+        _ = machine.handle(.started)
+        #expect(machine.attempts == 1)
+        _ = machine.handle(.heardSignal)
+        #expect(machine.attempts == 0)
+        #expect(machine.recoveries == 1, "The lifetime count is for diagnostics, and stays")
+    }
+
+    @Test func aFirstCaptureWaitsForSoundButALaterOneDoesNot() {
+        var machine = WaveCaptureMachine()
+        _ = machine.handle(.demanded)
+        _ = machine.handle(.started)
+        #expect(machine.state == .requestingPermission)
+        _ = machine.handle(.heardSignal)
+        _ = machine.handle(.released)
+        _ = machine.handle(.demanded)
+        _ = machine.handle(.started)
+        #expect(machine.state == .capturing)
+    }
+
+    @Test func staleEventsAreIgnored() {
+        var machine = WaveCaptureMachine()
+        #expect(machine.handle(.started).isEmpty)
+        #expect(machine.handle(.stalled).isEmpty)
+        #expect(machine.handle(.retryElapsed).isEmpty)
+        #expect(machine.state == .idle)
+    }
+
+    @Test func releasingCancelsAPendingRetry() {
+        var machine = WaveCaptureMachine()
+        _ = machine.handle(.demanded)
+        _ = machine.handle(.startFailed(retryable: true))
+        #expect(machine.handle(.released) == [.cancelRetry])
+    }
+}
+
+@Suite("Waveform pipeline memory")
+struct WaveformPipelineMemoryTests {
+    @Test func aLongBufferKeepsItsNewestSamples() {
+        let levels = OSAllocatedUnfairLock(initialState: [Bool]())
+        let pipeline = WaveformPipeline(sampleRate: 48_000, sensitivity: 1) { _, signal in levels.withLock { $0.append(signal) } }
+        let samples = [Float](repeating: 0, count: 8192) + tone(120)
+        samples.withUnsafeBufferPointer { pipeline.consume($0, channels: 1) }
+        #expect(levels.withLock { $0 } == [true], "Audio past the chunk size is what's left when silence came first")
     }
 }
 

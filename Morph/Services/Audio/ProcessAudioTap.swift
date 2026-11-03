@@ -1,11 +1,31 @@
 import AudioToolbox
 import CoreAudio
 import Foundation
+import os
 
 enum AudioCaptureError: Error, Equatable {
     case unsupportedSystem
     case noPlayerProcess
     case hardware(OSStatus)
+
+    /// Whether trying again could help. A player can take a moment to appear in Core Audio.
+    var isRetryable: Bool { self != .unsupportedSystem }
+
+    var summary: String {
+        switch self {
+        case .unsupportedSystem: "Needs macOS 14.2 or later"
+        case .noPlayerProcess: "The player has no audio process yet"
+        case .hardware(let status): "Core Audio error \(status)"
+        }
+    }
+}
+
+/// What the capture can say about itself. Buffers arriving is what separates a quiet song from a
+/// capture that has actually stopped.
+struct AudioCaptureHealth: Equatable, Sendable {
+    var bufferCount: UInt64
+    /// The tap still follows the player's current processes.
+    var followsPlayer: Bool
 }
 
 /// Captures one player's output so it can be measured. Audio is read in memory and discarded;
@@ -16,29 +36,35 @@ protocol AudioCapturing: AnyObject, Sendable {
                completion: @escaping @Sendable (AudioCaptureError?) -> Void)
     func setSensitivity(_ sensitivity: Float)
     func stop()
+    /// Answers off the main thread, because reading the process list can block.
+    func checkHealth(_ reply: @escaping @Sendable (AudioCaptureHealth) -> Void)
 }
 
 final class ProcessTapCapture: AudioCapturing, @unchecked Sendable {
-    /// Setup and teardown can take a moment, and FFT work runs here too. Never the main thread.
-    private let queue = DispatchQueue(label: "com.athene.morph.audio-capture", qos: .userInitiated)
-    /// Only touched on `queue`.
+    /// Setup and teardown can block for a moment, so never the main thread.
+    private let control = DispatchQueue(label: "com.athene.morph.audio-capture", qos: .userInitiated)
+    /// Buffers and FFT work. Separate from `control` because `AudioDeviceStop` waits for the IO
+    /// block to return, and on one shared serial queue that wait would never end.
+    private let analysis = DispatchQueue(label: "com.athene.morph.audio-analysis", qos: .userInitiated)
+    /// Only touched on `control`.
     private var session: AnyObject?
+    private var target: (bundleIdentifier: String, processes: Set<AudioObjectID>)?
 
     func start(bundleIdentifier: String, outputUID: String, sensitivity: Float,
                onLevels: @escaping @Sendable ([Float], Bool) -> Void,
                completion: @escaping @Sendable (AudioCaptureError?) -> Void) {
-        queue.async { [self] in
+        control.async { [self] in
             guard #available(macOS 14.2, *) else {
                 completion(.unsupportedSystem)
                 return
             }
-            (session as? TapSession)?.close()
-            session = nil
+            closeSession()
             do {
                 let processes = Self.playerProcesses(bundleIdentifier)
                 guard !processes.isEmpty else { throw AudioCaptureError.noPlayerProcess }
                 session = try TapSession(processes: processes, outputUID: outputUID, sensitivity: sensitivity,
-                                         queue: queue, onLevels: onLevels)
+                                         queue: analysis, onLevels: onLevels)
+                target = (bundleIdentifier, Set(processes))
                 completion(nil)
             } catch {
                 completion(error as? AudioCaptureError ?? .hardware(-1))
@@ -47,18 +73,32 @@ final class ProcessTapCapture: AudioCapturing, @unchecked Sendable {
     }
 
     func setSensitivity(_ sensitivity: Float) {
-        queue.async { [self] in
-            guard #available(macOS 14.2, *) else { return }
-            (session as? TapSession)?.pipeline.setSensitivity(sensitivity)
+        control.async { [self] in
+            guard #available(macOS 14.2, *), let tap = session as? TapSession else { return }
+            analysis.async { tap.pipeline.setSensitivity(sensitivity) }
         }
     }
 
     func stop() {
-        queue.async { [self] in
-            guard #available(macOS 14.2, *) else { return }
-            (session as? TapSession)?.close()
-            session = nil
+        control.async { [self] in closeSession() }
+    }
+
+    func checkHealth(_ reply: @escaping @Sendable (AudioCaptureHealth) -> Void) {
+        control.async { [self] in
+            guard #available(macOS 14.2, *), let tap = session as? TapSession, let target else {
+                reply(AudioCaptureHealth(bufferCount: 0, followsPlayer: true))
+                return
+            }
+            let current = Set(Self.playerProcesses(target.bundleIdentifier))
+            reply(AudioCaptureHealth(bufferCount: tap.bufferCount, followsPlayer: current.isEmpty || current == target.processes))
         }
+    }
+
+    private func closeSession() {
+        guard #available(macOS 14.2, *) else { return }
+        (session as? TapSession)?.close()
+        session = nil
+        target = nil
     }
 
     /// Players can render audio in helper processes, which share the bundle ID prefix.
@@ -73,11 +113,14 @@ final class ProcessTapCapture: AudioCapturing, @unchecked Sendable {
 }
 
 @available(macOS 14.2, *)
-private final class TapSession {
+private final class TapSession: @unchecked Sendable {
     let pipeline: WaveformPipeline
     private var tap = AudioObjectID(kAudioObjectUnknown)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
+    private let buffers = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+    var bufferCount: UInt64 { buffers.withLock { $0 } }
 
     init(processes: [AudioObjectID], outputUID: String, sensitivity: Float, queue: DispatchQueue,
          onLevels: @escaping @Sendable ([Float], Bool) -> Void) throws {
@@ -114,8 +157,9 @@ private final class TapSession {
         status = AudioHardwareCreateAggregateDevice(configuration as CFDictionary, &aggregate)
         guard status == noErr else { throw AudioCaptureError.hardware(status) }
 
-        let pipeline = pipeline
+        let (pipeline, buffers) = (pipeline, buffers)
         status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregate, queue) { _, input, _, _, _ in
+            buffers.withLock { $0 &+= 1 }
             for buffer in UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input)) {
                 guard let data = buffer.mData else { continue }
                 let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size

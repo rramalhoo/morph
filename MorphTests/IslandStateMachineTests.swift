@@ -242,6 +242,8 @@ struct IslandControllerTests {
         island.handle(.nextTab)
         #expect(island.presentation == .expanded(.timers))
         island.handle(.nextTab)
+        #expect(island.presentation == .expanded(.battery))
+        island.handle(.nextTab)
         #expect(island.presentation == .expanded(.shelf))
         island.handle(.nextTab)
         #expect(island.presentation == .expanded(.home))

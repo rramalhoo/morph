@@ -21,8 +21,18 @@ private struct Fixture {
     let waveform: WaveformService
     let ambient = AmbientColorService()
     let island: IslandController
+    let focus: FocusService
+    let screenshots: ScreenshotService
+    let external: LiveActivityStore
+    let liveAPI: LiveAPIService
+    let deviceBattery: DeviceBatteryService
 
     init() {
+        focus = FocusService(scheduler: scheduler, defaults: makeDefaults())
+        screenshots = ScreenshotService(scheduler: scheduler)
+        external = LiveActivityStore(scheduler: scheduler)
+        liveAPI = LiveAPIService(store: external, tokens: InMemoryTokens(), scheduler: scheduler)
+        deviceBattery = DeviceBatteryService(reader: StubPeripherals(), scheduler: scheduler)
         activities = ActivityManager(scheduler: scheduler)
         timers = TimerService(scheduler: scheduler)
         media = MediaController(providers: [provider], events: StubMediaEvents(), scheduler: scheduler)
@@ -33,7 +43,8 @@ private struct Fixture {
                                     brightness: brightness, scheduler: scheduler)
         waveform = WaveformService(capture: capture, scheduler: scheduler)
         island = IslandController(preferences: preferences, activities: activities, timers: timers,
-                                  media: media, volume: volume, scheduler: scheduler)
+                                  media: media, volume: volume, scheduler: scheduler,
+                                  focus: focus, external: external)
         battery.refresh()
     }
 
@@ -49,6 +60,10 @@ private struct Fixture {
             .environment(timers)
             .environment(activities)
             .environment(shelf)
+            .environment(focus)
+            .environment(screenshots)
+            .environment(external)
+            .environment(deviceBattery)
     }
 }
 
@@ -364,6 +379,11 @@ struct SettingsScreenTests {
                 .environment(fixture.waveform)
                 .environment(fixture.battery)
                 .environment(launchAtLogin)
+                .environment(fixture.screenshots)
+                .environment(fixture.liveAPI)
+                .environment(fixture.external)
+                .environment(fixture.focus)
+                .environment(fixture.deviceBattery)
             let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 720, height: 520), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: root)
@@ -484,7 +504,40 @@ struct RenderingTests {
         fixture.activities.dismissCurrent()
         fixture.island.showTab(.shelf)
         try render("expanded-shelf-empty")
+        fixture.island.showTab(.focus)
+        fixture.focus.startFocus()
+        try render("expanded-focus")
+        fixture.island.showTab(.battery)
+        fixture.deviceBattery.apply([PeripheralReading(name: "Magic Keyboard", percentage: 71, isCharging: nil),
+                                     PeripheralReading(name: "Magic Mouse", percentage: 14, isCharging: nil)])
+        let airpods = AudioOutputDevice(id: 2, uid: "AA-BB-CC-DD-EE-FF:output", name: "AirPods Pro", transport: .bluetooth)
+        fixture.volume.apply(OutputState(device: airpods, volume: 0.68, isMuted: false, canSetVolume: true, canMute: true), devices: [speakers, airpods])
+        try render("expanded-battery")
         fixture.island.send(.escapePressed)
+        try render("live-focus")
+        fixture.focus.stop()
+        fixture.timers.resetCountdown()
+        fixture.timers.resetStopwatch()
+        fixture.timers.startCountdown(.seconds(300))
+        fixture.activities.present(.outputVolume(percentage: 68, muted: false))
+        try render("level-volume")
+        fixture.activities.present(.outputVolume(percentage: 68, muted: true))
+        try render("level-muted")
+        fixture.activities.present(.brightness(increased: true, percentage: nil))
+        try render("level-brightness-no-reading")
+        fixture.activities.dismissCurrent()
+        let capture = ScreenshotPreview(url: URL(fileURLWithPath: "/tmp/Screenshot 2026-11-02 at 22.14.09.png"))
+        fixture.screenshots.show(capture, thumbnail: try #require(NSImage(data: cover)))
+        fixture.activities.present(.screenshot(capture))
+        try render("screenshot")
+        fixture.activities.dismissCurrent()
+        let upload = try fixture.external.create(LiveActivityPayload(json: Data(#"{"id":"u","title":"Uploading","subtitle":"Morph API","progress":0.65}"#.utf8)))
+        fixture.activities.present(.external(upload))
+        fixture.activities.dismissCurrent()
+        fixture.timers.resetCountdown()
+        try render("live-external")
+        fixture.external.removeAll()
+        fixture.timers.startCountdown(.seconds(300))
         try render("live-timer")
         fixture.activities.present(.powerConnected(percentage: 85, charging: true))
         try render("activity-minimal")

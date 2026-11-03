@@ -135,6 +135,7 @@ final class StubAudioCapture: AudioCapturing, @unchecked Sendable {
     var stopCount = 0
     var startError: AudioCaptureError?
     var onLevels: (@Sendable ([Float], Bool) -> Void)?
+    var health = AudioCaptureHealth(bufferCount: 1, followsPlayer: true)
 
     func start(bundleIdentifier: String, outputUID: String, sensitivity: Float,
                onLevels: @escaping @Sendable ([Float], Bool) -> Void,
@@ -146,6 +147,7 @@ final class StubAudioCapture: AudioCapturing, @unchecked Sendable {
 
     func setSensitivity(_ sensitivity: Float) {}
     func stop() { stopCount += 1 }
+    func checkHealth(_ reply: @escaping @Sendable (AudioCaptureHealth) -> Void) { reply(health) }
 }
 
 final class StubScriptRunner: ScriptRunning, @unchecked Sendable {
@@ -170,4 +172,29 @@ struct StubApplications: ApplicationProbing {
     func isInstalled(_ bundleIdentifier: String) -> Bool { installed }
     func isRunning(_ bundleIdentifier: String) -> Bool { running }
     func automationAccess(to bundleIdentifier: String, ask: Bool) -> MediaAvailability { access }
+}
+
+final class InMemoryTokens: LiveAPITokenStoring, @unchecked Sendable {
+    var token: String?
+    var failsToSave = false
+
+    func load() -> String? { token }
+
+    func save(_ token: String) -> Bool {
+        guard !failsToSave else { return false }
+        self.token = token
+        return true
+    }
+
+    func delete() { token = nil }
+}
+
+final class StubPeripherals: PeripheralInventoryReading, @unchecked Sendable {
+    var readings: [PeripheralReading] = []
+    var readCount = 0
+
+    func read() -> [PeripheralReading] {
+        readCount += 1
+        return readings
+    }
 }

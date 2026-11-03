@@ -50,6 +50,12 @@ struct CountdownTimer: Equatable, Sendable {
         phase = .idle
     }
 
+    /// Picks a countdown back up after a relaunch, from what was saved.
+    mutating func restore(total: Duration, remaining: Duration, isPaused: Bool, at now: ContinuousClock.Instant) {
+        duration = total
+        phase = isPaused ? .paused(remaining: remaining) : .running(endsAt: now.advanced(by: remaining))
+    }
+
     /// Returns true if this call is what finished the timer.
     mutating func complete(at now: ContinuousClock.Instant) -> Bool {
         guard case .running(let end) = phase, now >= end else { return false }

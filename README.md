@@ -2,9 +2,9 @@
 
 **Your Mac. More alive.**
 
-Morph is a native macOS utility that turns the MacBook camera notch into a fluid, interactive Dynamic Island: hover and click it for now playing, battery, timers, quick actions and a file shelf, while short activities such as charging or a finished timer appear on their own.
+Morph is a native macOS utility that turns the MacBook camera notch into a fluid, interactive Dynamic Island: hover and click it for now playing, battery, timers, focus sessions, quick actions and a file shelf, while short activities such as charging, a new screenshot or a finished timer appear on their own. Other apps and scripts can show their own activities through a [local API](docs/LIVE_ACTIVITIES_API.md).
 
-Swift 6, SwiftUI and AppKit. No third-party dependencies, no private frameworks. macOS 14 or later.
+Swift 6, SwiftUI and AppKit. No third-party dependencies. macOS 14 or later. One private framework, DisplayServices, is used only if you turn on Replace macOS Brightness HUD.
 
 ## Build and run
 
@@ -26,7 +26,17 @@ xcodebuild test -project Morph.xcodeproj -scheme Morph \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData
 ```
 
-The window tests open the real overlay panel on your screens for a few seconds. To write every island state out as PNG for design review, add `TEST_RUNNER_MORPH_SNAPSHOT_DIR=/some/dir` and, because the sandboxed host can't write there, `CODE_SIGN_ENTITLEMENTS= ENABLE_APP_SANDBOX=NO`.
+The window tests open the real overlay panel on your screens for a few seconds. To write every island state out as PNG for design review, set the environment variable `TEST_RUNNER_MORPH_SNAPSHOT_DIR=/some/dir` and, because the sandboxed host can't write there, pass the build settings `CODE_SIGN_ENTITLEMENTS= ENABLE_APP_SANDBOX=NO`.
+
+`TEST_RUNNER_MORPH_LIVE_KEY_TEST=1` posts real volume keys through the window server to prove the tap swallows them. It needs Accessibility, and it briefly moves the volume by one step for its control check before restoring it.
+
+## Install on another Mac
+
+1. Build Release as above, then zip it, which preserves the signature: `ditto -c -k --keepParent build/DerivedData/Build/Products/Release/Morph.app Morph.zip`
+2. Copy the zip to the other Mac, unzip it and move **Morph** to Applications.
+3. The build is signed for development and isn't notarized, so Gatekeeper blocks the first launch. Try to open it, then choose **Open Anyway** in System Settings → Privacy & Security.
+4. Quit any older copy first. Morph 2.3 replaces a copy that's 2.3 or newer by itself, but older versions don't know how to step aside.
+5. Grant permissions as each feature asks. They're per Mac and per signature, so a rebuild with a different identity asks again.
 
 ## Using it
 
@@ -35,6 +45,7 @@ The window tests open the real overlay panel on your screens for a few seconds. 
 | Point at the notch | The island grows slightly and shows the most relevant thing |
 | Click the island | Opens the panel: Home, Timers, File Shelf |
 | Click an alert | Dismisses it |
+| Drag a screenshot's thumbnail | Hands the file to the app you drop it on |
 | Two-finger swipe left or right over the island | Next or previous track |
 | Two-finger swipe up or down, or mouse wheel | Changes the output volume |
 | Click the open panel's background | Closes it |
@@ -59,10 +70,14 @@ Morph appears on the display with a notch by default. On a display without one i
 | Dropped files, read-only | Shelf keeps a bookmark and never copies the file | Implicit in the drop |
 | Network client | Spotify artwork from `https` URLs only | Never prompts |
 | Accessibility | Only for Replace macOS Volume/Brightness HUD: an active event tap limited to `NX_SYSDEFINED` events, so it never sees typing | When you turn a Replace option on |
+| Screenshot folder, read-only | The one folder you choose in Settings → Screenshots, kept as a security-scoped bookmark | When you choose it |
+| Network server, loopback only | The optional local API. No socket exists while it's off | Never prompts |
+| Keychain | The local API's token | Only when you turn the API on |
+| Notifications | Optional focus session alert | Only if you enable it |
 
 Showing volume and brightness, audio device connections and cinema mode need no permission. Audio is analyzed in memory and discarded: nothing is recorded, saved or sent, and the microphone isn't used. macOS doesn't tell apps whether audio capture was granted, so a denial appears in Settings → Music as "no audio received". To change it later, use System Settings → Privacy & Security → Screen & System Audio Recording.
 
-The app is sandboxed with the hardened runtime in Release. Entitlements are in `Config/Morph.entitlements`. It holds no credentials and stores no tokens. Two scoped sandbox exceptions exist for HUD replacement: `com.apple.backlightd` (brightness) and `com.apple.universalaccessAuthWarn` (the Accessibility check).
+The app is sandboxed with the hardened runtime in Release. Entitlements are in `Config/Morph.entitlements`. Two scoped sandbox exceptions exist for HUD replacement: `com.apple.backlightd` (brightness) and `com.apple.universalaccessAuthWarn` (the Accessibility check).
 
 ## Architecture
 
@@ -76,14 +91,16 @@ Morph/
 │   ├── DesignSystem/  Color, type, spacing and motion tokens
 │   ├── Components/    Shared controls
 │   └── Island/        State machine, layout, controller, views
-├── Services/          Activities, Battery, Media, Files, Timers, System
+├── Services/          Activities, Audio, Battery, Files, Focus, Input, LiveActivities,
+│                      Media, Screenshots, System, Timers
 ├── Settings/          Settings window and sections
 └── Resources/
 MorphTests/            Unit and real-window integration tests
+docs/                  Local API documentation and examples
 Config/                Build settings, Info.plist, entitlements
 ```
 
-The logic with the most edge cases is in plain value types with no UI or timers, which is what makes it testable: `IslandStateMachine`, `ActivityQueue`, `BatteryTransitionDetector`, `CountdownTimer`, `Stopwatch`, `NotchGeometry`, `DisplaySelector` and `IslandLayout`. All delays go through the `Scheduling` protocol, so tests run on a manual clock.
+The logic with the most edge cases is in plain value types with no UI or timers, which is what makes it testable: `IslandStateMachine`, `ActivityQueue`, `WaveCaptureMachine`, `PomodoroSession`, `ScreenshotDetector`, `LiveActivityPayload`, `BatteryTransitionDetector`, `CountdownTimer`, `Stopwatch`, `NotchGeometry`, `DisplaySelector` and `IslandLayout`. All delays go through the `Scheduling` protocol, so tests run on a manual clock.
 
 Key decisions:
 
@@ -109,10 +126,16 @@ There is no public macOS API for system-wide Now Playing. `MediaRemote` is priva
 
 | Feature | Mechanism | Real limit |
 | --- | --- | --- |
-| Waveform | Core Audio process tap on the player only, FFT with Accelerate off the main thread, at most 30 UI updates per second | macOS 14.2 or later. The tap runs only while the bars are on screen and music plays. If only silence arrives, it stops, and the static icon returns until the next track. |
+| Waveform | Core Audio process tap on the player only, with an explicit state machine: `idle`, `requestingPermission`, `starting`, `capturing`, `recovering`, `unavailable`, `stopped`. FFT, RMS, band energy and transients with Accelerate off the main thread, at most 30 UI updates per second | macOS 14.2 or later. The tap runs only while the bars are on screen and music plays. Buffers arriving means the capture is alive, so silence never causes a restart. No buffers for 4 seconds means recovery, with backoff from 0.5 to 30 seconds and at most 6 attempts in a row. macOS doesn't report a denied permission: 20 seconds of pure silence from a capture that has never heard sound counts as that, and it waits for the next track. With Reduce Motion the static icon shows and nothing is captured. Settings → Music has live diagnostics. |
 | Output volume | Core Audio listeners on the default output, moved when the output changes | HDMI and some USB devices have no software volume, so they show no percentage and no slider. |
-| Brightness | Brightness keys, read from `systemDefined` events | **No percentage on Apple silicon.** `IODisplayGetFloatParameter` has no service there, and the registry's brightness values didn't change when brightness did, so the island shows direction only. Control Center's slider and automatic brightness can't be detected. |
-| Replacing the macOS HUDs | Off by default. An active tap on its own thread applies the change, reads it back, and only then swallows the key. If the change fails, the key goes to macOS and that output or display stays with macOS until the hardware changes | No API hides the native HUD, so it stays hidden only because the key never reaches macOS. Brightness uses the private DisplayServices framework, built-in display only, and could break in a macOS update. Option or Command/Control with a key, outputs without software volume, cinema, pause, lock and sleep all stay with macOS. Keys that send F14/F15 aren't handled. Whether a sandboxed app may hold an active tap after Accessibility is granted is not yet confirmed. If it can't, Settings shows that macOS refused the tap and the keys keep working natively. |
+| Brightness | Brightness keys, read from `systemDefined` events | **No percentage on Apple silicon without Replace.** `IODisplayGetFloatParameter` has no service there and no other public API exists, so the island shows direction only. Replace reads the real level through the private DisplayServices, built-in display only. External monitors are never assumed to work. Control Center's slider and automatic brightness can't be detected. |
+| Screenshots | A directory event on one folder you chose, then the file's `kMDItemIsScreenCapture` attribute, which works in any language and filename format | macOS won't tell a sandboxed app where it saves, so you choose the folder. With the floating thumbnail on, macOS writes the file seconds after the capture. Clipboard captures create no file. Previews end when the screen locks. Morph takes no captures itself, so ScreenCaptureKit isn't used. |
+| Seeking | The player's own `player position` | Sent once, at the end of a drag. Tracks without a duration can't seek, and the bar is inactive for them. |
+| macOS Focus | Not read | `INFocusStatusCenter` is public, but it reports only one yes or no, needs a user prompt and a Communication Notifications entitlement that doesn't suit a build you can copy to another Mac. Morph Focus is separate, doesn't reflect the system's, and only quiets the island. |
+| Peripheral batteries | `IOPowerSources`, then the `BatteryPercent` IORegistry property that Apple's keyboards, mice and trackpads publish. Needs no Bluetooth permission | IOKit is public, but that property is undocumented and could change. Other accessories show only as connected if macOS has no value. Read when a device connects, while the Battery tab is open, or every few minutes for alerts. |
+| Live Activities API | HTTP on `127.0.0.1` with a Keychain token, off by default | Local only. See [the API documentation](docs/LIVE_ACTIVITIES_API.md). |
+
+| Replacing the macOS HUDs | Off by default. An active tap on its own thread applies the change, reads it back, and only then swallows the key. If the change fails, the key goes to macOS and that output or display stays with macOS until the hardware changes | No API hides the native HUD, so it stays hidden only because the key never reaches macOS. Brightness uses the private DisplayServices framework, built-in display only, and could break in a macOS update. Option or Command/Control with a key, outputs without software volume, cinema, pause, lock and sleep all stay with macOS. Keys that send F14/F15 aren't handled. It works in the sandbox: a real key posted through the window server was swallowed, and the same key without the tap changed the volume. |
 | AirPods and Bluetooth audio | A Bluetooth output appears in Core Audio while connected, so no Bluetooth permission is needed | Battery is shown only if `IOPowerSources` lists that exact device. AirPods usually aren't listed. `system_profiler` returns nothing inside the sandbox, even with the Bluetooth entitlement. |
 | Cinema mode | Window geometry on Space, app and screen changes, with follow-up checks | macOS has no public "is full screen" for other apps. Below a notch, a full screen window is recognized by leaving the usable area. With no Dock on the display, that looks like a maximized window, and the "unclear" preference decides. |
 | Gestures | Scroll events delivered to the island's own window | Two fingers only. Three- and four-finger swipes belong to the system. |
@@ -121,10 +144,32 @@ System output volume changes aren't reported while the panel is open, because it
 
 ## Not implemented
 
-- AirPods battery beyond the above: no public API, and no private ones are used.
+- AirPods battery beyond the above: no public API, and no private ones are used. Left and right earbuds and the case are never shown separately.
+- Screenshots taken by Morph itself, and screenshot history.
+- Reading or changing macOS Focus.
 - Other players, browsers: see above.
 
+## Activity priorities
+
+Highest first. A higher priority interrupts a lower one, and the same kind of event updates in place rather than stacking up.
+
+1. Battery alerts
+2. Answers to a gesture or command
+3. Volume and brightness
+4. Screenshots
+5. Device changes, then timers and focus sessions
+6. Live Activities from other apps
+7. Battery and music events
+8. Decorative
+
+While you drag a slider, only a critical alert can appear. What waited appears when you let go. While a focus session or Morph Focus is on, anything below timers stays out of the island.
+
 ## How to test the new features
+
+- **Screenshots:** in Settings → Screenshots, turn on previews and choose the folder shown under Options in Command-Shift-5. Take a screenshot, then try each action and drag the thumbnail into another app.
+- **Focus:** open the Focus tab and start a session, with short durations from Settings → Focus. Quit and reopen Morph mid-session.
+- **API:** turn it on in Settings → Activities, copy the token, and run the [examples](docs/examples).
+- **Battery:** open the Battery tab with a Bluetooth keyboard, mouse or AirPods connected.
 
 - **Volume:** in Settings → System, turn on Show Volume HUD, then Replace macOS Volume HUD, and grant Accessibility. Press the volume keys and mute: one HUD should appear, with no macOS indicator.
 - **Waveform:** play music in Apple Music and allow audio capture when macOS asks. Try songs with heavy bass and sparse vocals: the center bars follow the low end and the edges follow the highs. Pause, and the bars settle and stay still before the island returns to rest.
@@ -135,34 +180,38 @@ System output volume changes aren't reported while the panel is open, because it
 
 ## Verification status
 
-Automated on a MacBook Air M5 with macOS 27.2 and Xcode 27.2: the suite runs under the real sandbox, including the real `NSPanel`, real `NSEvent`s through it, the FFT against synthesized tones, and every Settings screen in a real window. Tests that need key focus are skipped while the session is locked, and the one that needs real focus reports a known issue when another app is holding it.
+Morph 2.3, on a MacBook Air M5 with macOS 27.2 and Xcode 27.2. The suite runs under the real sandbox, including the real `NSPanel`, real `NSEvent`s through it, the FFT against synthesized tones, and every Settings screen in a real window.
 
-Checked against the running Release app:
+Proven automatically:
 
-- Hover: moving the real cursor onto the notch grows the window from 180×32 to 320×68, and leaving collapses it, with no flicker. The cursor was warped, which isn't identical to a physical mouse.
-- Volume: ten rapid system volume changes took the window from 260×33 to 324×49 once, with no intermediate size. It closed about 1.9 s after the last change.
-- Key handling: the real engine changed real volume, mute and brightness under the sandbox in 6–18 ms per key, confirmed by read-back. These were simulated presses passed to the engine, not physical keys through a tap.
-- Opening Morph a second time brings up Settings, with one instance running.
-- Battery against `pmset`, the Apple Music status script against the Music app, real Core Audio output reading, the Automation probe and tap creation under the sandbox.
+- **HUD replacement:** with Accessibility granted, a sandboxed app holds the active tap. A real volume key posted through the window server reached it and was swallowed with the volume unchanged. The same kind of key without the tap moved the volume from 50% to 44%.
+- **Live API:** create, update and end over a real socket, under the sandbox, from outside clients using the curl, Python and Swift examples. The server refused connections on the Mac's LAN address.
+- **Screenshots:** real files, the real directory watcher and the real attribute, including the lock rules. The attribute was confirmed on real screenshots from this Mac.
+- **Keychain:** storing, replacing and deleting a throwaway token.
 
 ### Manual tests still required
 
-The development environment can't capture the screen or post system-wide events, and the session was locked during the last checks:
+These need a person, a physical device or a screen capture that the development environment can't do:
 
-- [ ] **Waveform with real music**, including the audio capture prompt: real capture has never run against a playing track
-- [ ] **Cinema mode on a real full screen window.** The detector is built from a real measurement, but the Mac locked before the fix could be confirmed end to end
-- [ ] **HUD replacement with physical keys:** the sandboxed active tap after granting Accessibility, and the macOS indicator staying hidden, on the built-in and external keyboards, speakers and AirPods
+- [ ] **Morph 2.3 running as the installed app.** Every check above ran in the test host, not in a launched Release copy
+- [ ] **Waveform with real music**, including the audio capture prompt, Spotify, Apple Music, pausing, changing output and sleep: the recovery rules are tested against a simulated capture, and real capture has never run against a playing track
+- [ ] **HUD replacement with physical keys,** on the built-in and external keyboards, watching that the macOS indicator stays hidden, and with speakers, AirPods and HDMI
+- [ ] **A real screenshot** through Command-Shift-5, each action on the preview, and dragging into another app. The file watcher was tested with files marked the same way
+- [ ] The local API from the installed app, including creating the Keychain token
+- [ ] Focus notifications, and a session across quitting Morph
+- [ ] Battery tab with real Bluetooth peripherals: the development Mac had none connected
+- [ ] Seeking with real players, and the moving light on real covers
 - [ ] Revoking Accessibility and force-quitting Morph while keys are held: macOS should get them back
 - [ ] Sleep and wake, output changes and Reduce Motion with the HUD
+- [ ] Animation quality on real hardware: the new HUD was checked as still frames, not in motion
+- [ ] **Cinema mode on a real full screen window**
 - [ ] AirPods: connect, disconnect and change output
 - [ ] Trackpad gestures with real fingers, and a real mouse wheel
 - [ ] Idle shape against the camera housing, with no seam
-- [ ] Animation quality, and Reduce Motion
 - [ ] A physical click doesn't take focus from the active app
-- [ ] Allow Access, then track, artwork, play/pause, next, previous and seek in Apple Music
-- [ ] Spotify, which isn't installed on the development Mac
+- [ ] Allow Access, then track, artwork, play/pause, next and previous in Apple Music
 - [ ] File drag in and out, Quick Look
 - [ ] Power changes, a timer finishing, low battery alerts
 - [ ] Launch at login, notifications, menu bar actions, right-click menu
-- [ ] Display changes, Spaces, sleep and wake
+- [ ] Display changes, Spaces
 - [ ] VoiceOver, and Tab navigation (needs Full Keyboard Access)

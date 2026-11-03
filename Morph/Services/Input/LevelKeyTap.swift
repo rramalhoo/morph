@@ -80,6 +80,9 @@ private final class LevelKeyTapSession: @unchecked Sendable {
             CGEvent.tapEnable(tap: port, enable: true)
             ready.signal()
             CFRunLoopRun()
+            // Taken apart on the thread that uses it, once it can no longer deliver anything.
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+            CFMachPortInvalidate(port)
             release.release()
         }
         thread.name = "com.athene.morph.level-keys"
@@ -91,7 +94,6 @@ private final class LevelKeyTapSession: @unchecked Sendable {
     func stop() {
         guard let port, let runLoop else { return }
         CGEvent.tapEnable(tap: port, enable: false)
-        CFMachPortInvalidate(port)
         CFRunLoopStop(runLoop)
     }
 

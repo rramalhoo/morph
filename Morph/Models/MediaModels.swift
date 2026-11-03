@@ -79,6 +79,12 @@ struct PlaybackSnapshot: Equatable, Sendable {
 
     var isPlaying: Bool { state == .playing }
 
+    /// A live stream has no timeline to move along, and neither does a track with no position.
+    var canSeek: Bool {
+        guard let duration = track?.duration else { return false }
+        return duration > 0 && position != nil
+    }
+
     /// Position extrapolated from the last report, so the UI needs no polling.
     func position(at instant: ContinuousClock.Instant) -> TimeInterval? {
         guard let position else { return nil }

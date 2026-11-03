@@ -11,6 +11,7 @@ final class AppCoordinator {
     private let shelf = FileShelfStore()
     private let launchAtLogin = LaunchAtLoginService()
     private let notifications = TimerNotificationService()
+    private let focusNotifications = TimerNotificationService(identifier: "com.athene.morph.focus")
     private let activities: ActivityManager
     private let timers: TimerService
     private let media: MediaController
@@ -19,6 +20,11 @@ final class AppCoordinator {
     private let levelKeys: LevelKeyService
     private let displayBrightness = DisplayServicesBrightness()
     private let waveform: WaveformService
+    private let focus: FocusService
+    private let screenshots: ScreenshotService
+    private let externalActivities: LiveActivityStore
+    private let liveAPI: LiveAPIService
+    private let deviceBattery: DeviceBatteryService
     private let ambient = AmbientColorService()
     private let peripherals: any PeripheralBatteryReading = PowerSourcePeripheralReader()
     private let island: IslandController
@@ -43,6 +49,11 @@ final class AppCoordinator {
     init() {
         activities = ActivityManager(scheduler: scheduler)
         timers = TimerService(scheduler: scheduler)
+        focus = FocusService(scheduler: scheduler)
+        screenshots = ScreenshotService(scheduler: scheduler)
+        externalActivities = LiveActivityStore(scheduler: scheduler)
+        liveAPI = LiveAPIService(store: externalActivities, tokens: KeychainTokenStore(), scheduler: scheduler)
+        deviceBattery = DeviceBatteryService(reader: SystemPeripheralInventory(), scheduler: scheduler)
 
         let runner = OSAScriptRunner()
         let probe = WorkspaceApplicationProbe()
@@ -62,7 +73,8 @@ final class AppCoordinator {
                                     brightness: displayBrightness, scheduler: scheduler)
         waveform = WaveformService(capture: ProcessTapCapture(), scheduler: scheduler)
         island = IslandController(preferences: preferences, activities: activities, timers: timers,
-                                  media: media, volume: volume, scheduler: scheduler)
+                                  media: media, volume: volume, scheduler: scheduler,
+                                  focus: focus, external: externalActivities)
 
         quickActions = QuickActionRunner(
             preferences: preferences,
@@ -91,6 +103,8 @@ final class AppCoordinator {
         observeSleep()
         observeSession()
         levelKeys.refreshSupport()
+        applyFocusConfiguration()
+        focus.restore()
         loops = [
             ObservationLoop { [weak self] in self?.applyEnabledState() },
             ObservationLoop { [weak self] in self?.applyModules() },
@@ -99,6 +113,10 @@ final class AppCoordinator {
             ObservationLoop { [weak self] in self?.applyAmbientColor() },
             ObservationLoop { [weak self] in self?.applyCinema() },
             ObservationLoop { [weak self] in self?.applyLevelKeys() },
+            ObservationLoop { [weak self] in self?.applyFocusConfiguration() },
+            ObservationLoop { [weak self] in self?.applyScreenshots() },
+            ObservationLoop { [weak self] in self?.applyLiveAPI() },
+            ObservationLoop { [weak self] in self?.applyDeviceBattery() },
         ]
     }
 
@@ -145,6 +163,10 @@ final class AppCoordinator {
         .environment(timers)
         .environment(activities)
         .environment(shelf)
+        .environment(focus)
+        .environment(screenshots)
+        .environment(externalActivities)
+        .environment(deviceBattery)
         .environment(\.quickActionRunner, quickActions)
     }
 
@@ -158,6 +180,11 @@ final class AppCoordinator {
             .environment(waveform)
             .environment(battery)
             .environment(launchAtLogin)
+            .environment(screenshots)
+            .environment(liveAPI)
+            .environment(externalActivities)
+            .environment(focus)
+            .environment(deviceBattery)
     }
 
     // MARK: - Wiring
@@ -175,13 +202,15 @@ final class AppCoordinator {
         volume.onConnectionEvent = { [weak self] event in self?.handle(event) }
         cinema.onChange = { [weak self] state in self?.island.update(cinema: state) }
         brightness.onChange = { [weak self] increased, percentage in
+            guard self?.preferences.brightnessIndicator == true else { return }
             self?.presentLevel(.brightness(increased: increased, percentage: percentage))
         }
+        brightness.onVolumeKey = { [weak self] in self?.presentCurrentVolume() }
         levelKeys.onUpdate = { [weak self] update, press, modifiers in
             self?.handle(update, press: press, modifiers: modifiers)
         }
         media.onVolumeChanged = { [weak self] volume in
-            guard let self, !self.island.mode.isExpanded else { return }
+            guard let self, self.preferences.volumeIndicator, !self.island.mode.isExpanded else { return }
             self.presentLevel(.volumeChanged(percentage: volume))
         }
         timers.onCompleted = { [weak self] duration in
@@ -196,18 +225,55 @@ final class AppCoordinator {
             }
         }
         shelf.onAdded = { [weak self] count in self?.present(.filesAdded(count: count)) }
+        focus.onFinished = { [weak self] phase in self?.activities.present(.focusFinished(phase)) }
+        focus.onNotificationChange = { [weak self] remaining, title in
+            guard let self else { return }
+            if let remaining, self.preferences.focusNotifications {
+                self.focusNotifications.schedule(after: remaining, title: title)
+            } else {
+                self.focusNotifications.cancel()
+            }
+        }
+        screenshots.onCaptured = { [weak self] preview in
+            guard let self, self.preferences.activitiesEnabled else { return }
+            self.activities.present(.screenshot(preview), duration: .seconds(self.preferences.screenshotDuration))
+        }
+        activities.shouldExtend = { [weak self] activity in
+            guard let self, activity.presentation == .screenshot else { return false }
+            return self.island.isPointerInside || self.screenshots.isDragging && self.island.isExportingDrag
+        }
+        externalActivities.onChange = { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .started(let activity): self.present(.external(activity))
+            case .finished(let activity):
+                if activity.state == .success || activity.state == .failed { self.present(.external(activity)) }
+            }
+        }
+        deviceBattery.onLow = { [weak self] reading in
+            guard let percentage = reading.percentage else { return }
+            self?.present(.peripheralLow(name: reading.name, percentage: percentage))
+        }
     }
 
     /// Battery warnings are never optional. Everything else respects the Activities switch.
     private func present(_ content: IslandActivity.Content) {
         guard preferences.activitiesEnabled else { return }
+        // Focus keeps routine activities out, while anything from timers up still gets through.
+        if focus.isQuiet, IslandActivity(content, at: scheduler.now).priority < .timer { return }
         activities.present(content)
     }
 
     private func presentLevel(_ content: IslandActivity.Content) {
         guard preferences.activitiesEnabled else { return }
         let seconds = content.levelKind == .brightness ? preferences.brightnessHUDDuration : preferences.volumeHUDDuration
-        activities.present(content, hold: .seconds(seconds))
+        activities.present(content, duration: .seconds(seconds))
+    }
+
+    /// Shows the output as it stands, which is what a key at either end of the range changes nothing about.
+    private func presentCurrentVolume() {
+        guard preferences.volumeIndicator, !island.mode.isExpanded, let state = volume.output, let percentage = state.percentage else { return }
+        presentLevel(.outputVolume(percentage: percentage, muted: state.effectivelyMuted))
     }
 
     private func handle(_ update: LevelUpdate, press: LevelKeyPress, modifiers: LevelKeyModifiers) {
@@ -252,6 +318,7 @@ final class AppCoordinator {
     private func handle(_ event: DeviceConnectionEvent) {
         lastConnectionChange = scheduler.now
         batteryWork?.cancel()
+        deviceBattery.refresh(force: true)
         guard preferences.deviceActivities else { return }
         switch event {
         case .connected(let device):
@@ -278,6 +345,7 @@ final class AppCoordinator {
                 self?.island.send(.reset)
                 self?.activities.removeAll()
                 self?.waveform.stopNow()
+                self?.screenshots.setSessionActive(false)
                 self?.setLevelKeysSuspended(true)
             }
         })
@@ -286,6 +354,7 @@ final class AppCoordinator {
                 guard let self else { return }
                 self.setLevelKeysSuspended(false)
                 guard self.isActive else { return }
+                self.applyWaveformDemand()
                 self.battery.refresh()
                 self.media.requestRefresh()
                 self.volume.resynchronize()
@@ -307,7 +376,11 @@ final class AppCoordinator {
         ]
         for (center, name, suspended) in events {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.setLevelKeysSuspended(suspended) }
+                MainActor.assumeIsolated {
+                    self?.screenshots.setSessionActive(!suspended)
+                    if suspended, case .screenshot? = self?.activities.current?.content { self?.activities.dismissCurrent() }
+                    self?.setLevelKeysSuspended(suspended)
+                }
             }
             sessionTokens.append((center, token))
         }
@@ -347,14 +420,14 @@ final class AppCoordinator {
                                              preferences.timerEnabled, preferences.mediaSource)
         battery.lowThreshold = preferences.lowBatteryThreshold
         activities.durationScale = preferences.activityDuration.scale
-        let wantsBrightness = preferences.brightnessIndicator
+        let wantsKeys = preferences.brightnessIndicator || preferences.volumeIndicator
         media.source = source
         guard preferences.isEnabled else { return }
         Task { @MainActor [weak self] in
             guard let self, self.isActive else { return }
             music ? self.media.start() : self.media.stop()
             power ? self.battery.start() : self.battery.stop()
-            wantsBrightness ? self.brightness.start() : self.brightness.stop()
+            wantsKeys ? self.brightness.start() : self.brightness.stop()
             if !timer { self.timers.stopAll() }
         }
     }
@@ -363,10 +436,12 @@ final class AppCoordinator {
     private func applyWaveformDemand() {
         waveform.sensitivity = Float(preferences.visualizationSensitivity)
         let isShowing = island.presentation == .live(.media)
-        guard preferences.audioVisualization, isShowing, media.snapshot?.isPlaying == true,
+        // Moving bars are what Reduce Motion turns off, so the static icon needs no capture.
+        let reduced = MorphMotion.resolve(preferences, systemReduced: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion).reduced
+        guard preferences.audioVisualization, !reduced, isShowing, media.snapshot?.isPlaying == true,
               let provider = media.snapshot?.provider, let track = media.snapshot?.track,
               let outputUID = volume.output?.device.uid else {
-            if !preferences.audioVisualization { waveform.stopNow() } else { waveform.update(demand: nil) }
+            if !preferences.audioVisualization || reduced { waveform.stopNow() } else { waveform.update(demand: nil) }
             return
         }
         waveform.update(demand: WaveformDemand(bundleIdentifier: provider.bundleIdentifier,
@@ -395,6 +470,30 @@ final class AppCoordinator {
         }
     }
 
+    private func applyFocusConfiguration() {
+        focus.configuration = FocusConfiguration(focus: .seconds(preferences.focusMinutes * 60),
+                                                 shortBreak: .seconds(preferences.shortBreakMinutes * 60),
+                                                 longBreak: .seconds(preferences.longBreakMinutes * 60),
+                                                 cycles: preferences.focusCycles, autoBreak: preferences.focusAutoBreak)
+    }
+
+    private func applyScreenshots() {
+        screenshots.apply(enabled: preferences.screenshotPreviews && preferences.isEnabled, bookmark: preferences.screenshotFolder)
+        // The image lives only as long as its activity. Anything that ended it lets it go.
+        if screenshots.current != nil, !activities.isActive(dedupeKey: "screenshot") { screenshots.clear() }
+    }
+
+    private func applyLiveAPI() {
+        liveAPI.apply(enabled: preferences.liveAPIEnabled && isActive,
+                      port: preferences.liveAPIPort.clamped(to: MorphPreferences.liveAPIPortRange))
+    }
+
+    private func applyDeviceBattery() {
+        deviceBattery.alertsEnabled = preferences.peripheralAlerts
+        deviceBattery.lowThreshold = preferences.lowBatteryThreshold
+        deviceBattery.refreshInterval = .seconds(preferences.deviceRefreshMinutes * 60)
+    }
+
     private func applyAppPresence() {
         statusItem.setVisible(preferences.showMenuBarIcon)
         settings.setDockIconVisible(preferences.showDockIcon)
@@ -404,7 +503,8 @@ final class AppCoordinator {
         if preferences.batteryEnabled { battery.start() }
         if preferences.musicEnabled { media.start() }
         volume.start()
-        if preferences.brightnessIndicator { brightness.start() }
+        if preferences.brightnessIndicator || preferences.volumeIndicator { brightness.start() }
+        deviceBattery.start()
     }
 
     private func stopServices() {
@@ -414,6 +514,8 @@ final class AppCoordinator {
         brightness.stop()
         waveform.stopNow()
         cinema.stop()
+        deviceBattery.stop()
+        screenshots.clear()
         activities.removeAll()
     }
 
@@ -421,6 +523,7 @@ final class AppCoordinator {
         isPaused.toggle()
         applyEnabledState()
         applyLevelKeys()
+        applyLiveAPI()
         if !isPaused { applyCinema() }
         statusItem.refresh()
     }
@@ -468,7 +571,11 @@ final class AppCoordinator {
             lines.append("Output: \(output.device.name) (\(output.device.transport)), volume \(output.percentage.map { "\($0)%" } ?? "not reported"), settable \(output.canSetVolume)")
         }
         lines.append("Level keys: \(levelKeys.status), volume handed back \(levelKeys.volumeHandedBack), brightness handed back \(levelKeys.brightnessHandedBack), brightness supported \(levelKeys.brightnessSupported)")
-        lines.append("Waveform: \(waveform.status)")
+        lines.append("Waveform: \(waveform.diagnostics)")
+        lines.append("Screenshots: \(screenshots.status)")
+        lines.append("Live API: \(liveAPI.status), \(externalActivities.activities.count) open, \(liveAPI.handledCount) requests, \(liveAPI.rejectedCount) rejected")
+        lines.append("Focus: \(focus.session.isActive ? focus.session.phase.title : "off"), Morph Focus \(focus.isMorphFocusOn)")
+        lines.append("Peripherals: \(deviceBattery.peripherals.count) with a known battery")
         lines.append("Cinema: \(island.cinema), evidence \(cinema.evidence)")
         lines.append("Launch at login: \(launchAtLogin.status.rawValue)")
         return lines.joined(separator: "\n")

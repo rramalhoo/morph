@@ -1,3 +1,4 @@
+import os
 import AppKit
 import CoreGraphics
 import Foundation
@@ -597,12 +598,55 @@ private let step = LevelKeyEngine.standardStep
     }
 
     /// The real thing: without Accessibility, macOS refuses the tap and nothing changes.
-    @Test func theRealTapFailsCleanlyWithoutPermission() throws {
-        try #require(!AXIsProcessTrustedForTests)
+    /// The outcome depends on whether this Mac has granted Accessibility, and both are checked.
+    @Test func theRealTapFollowsThePermission() {
         let tap = SystemLevelKeyTap()
         let installed = tap.install(handler: { _, _, _ in false }, onFailure: {})
-        #expect(!installed)
+        #expect(installed == AXIsProcessTrustedForTests)
         tap.remove()
+    }
+
+    /// Posts a real volume key through the window server and checks the tap got it and swallowed
+    /// it, with the output unchanged. Off by default: if the tap ever failed, the key would reach
+    /// macOS. Run with `TEST_RUNNER_MORPH_LIVE_KEY_TEST=1`.
+    @Test func aRealKeyEventReachesTheTapAndIsSwallowed() async throws {
+        try #require(AXIsProcessTrustedForTests)
+        guard ProcessInfo.processInfo.environment["MORPH_LIVE_KEY_TEST"] != nil else { return }
+        let output = CoreAudioOutputSystem()
+        let before = output.currentOutput()
+        let seen = OSAllocatedUnfairLock(initialState: [LevelKeyPress]())
+        let tap = SystemLevelKeyTap()
+        let installed = tap.install(handler: { press, _, _ in
+            seen.withLock { $0.append(press) }
+            return true
+        }, onFailure: {})
+        #expect(installed)
+        defer { tap.remove() }
+
+        for state in [0xA, 0xB] {
+            let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                           context: nil, subtype: 8, data1: (LevelKey.volumeUp.rawValue << 16) | (state << 8), data2: -1)
+            event?.cgEvent?.post(tap: .cghidEventTap)
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        print("LIVE-KEY received: \(seen.withLock { $0 })")
+        #expect(seen.withLock { $0 } == [LevelKeyPress(key: .volumeUp, isDown: true), LevelKeyPress(key: .volumeUp, isDown: false)])
+        #expect(output.currentOutput()?.volume == before?.volume, "Swallowed, so macOS changed nothing")
+
+        // The control: the same key, not swallowed, must move the volume. Otherwise the check above
+        // proves nothing.
+        tap.remove()
+        let device = try #require(before?.device.id)
+        let level = try #require(before?.volume)
+        defer { output.setVolume(level, device: device) }
+        for state in [0xA, 0xB] {
+            let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                           context: nil, subtype: 8, data1: (LevelKey.volumeDown.rawValue << 16) | (state << 8), data2: -1)
+            event?.cgEvent?.post(tap: .cghidEventTap)
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        print("LIVE-KEY control: \(level) -> \(output.currentOutput()?.volume ?? -1)")
+        #expect(output.currentOutput()?.volume != level, "A key that gets through reaches macOS")
     }
 }
 
@@ -684,20 +728,20 @@ private var AXIsProcessTrustedForTests: Bool { SystemAccessibilityPermission().i
     @Test func holdsThenConcludesThenCloses() {
         let manager = ActivityManager(scheduler: scheduler)
         manager.present(.outputVolume(percentage: 40, muted: false))
-        scheduler.advance(by: .milliseconds(1199))
+        scheduler.advance(by: IslandActivity.levelHold - IslandActivity.levelFade - .milliseconds(1))
         #expect(!manager.isConcluding)
         scheduler.advance(by: .milliseconds(1))
         #expect(manager.isConcluding)
         #expect(manager.current != nil)
         scheduler.advance(by: IslandActivity.levelFade)
-        #expect(manager.current == nil)
+        #expect(manager.current == nil, "Closes 1.2 seconds after the last change")
         #expect(!manager.isConcluding)
     }
 
     @Test func aChangeWhileConcludingReturnsToFullEmphasis() {
         let manager = ActivityManager(scheduler: scheduler)
         manager.present(.outputVolume(percentage: 40, muted: false))
-        scheduler.advance(by: .milliseconds(1300))
+        scheduler.advance(by: .milliseconds(1000))
         #expect(manager.isConcluding)
         manager.present(.outputVolume(percentage: 45, muted: false))
         #expect(!manager.isConcluding)
@@ -706,8 +750,8 @@ private var AXIsProcessTrustedForTests: Bool { SystemAccessibilityPermission().i
     @Test func holdFollowsThePreferenceNotActivityDuration() {
         let manager = ActivityManager(scheduler: scheduler)
         manager.durationScale = 1.6
-        manager.present(.brightness(increased: true, percentage: 50), hold: .seconds(2))
-        scheduler.advance(by: .seconds(2))
+        manager.present(.brightness(increased: true, percentage: 50), duration: .seconds(2))
+        scheduler.advance(by: .seconds(2) - IslandActivity.levelFade)
         #expect(manager.isConcluding)
         scheduler.advance(by: IslandActivity.levelFade)
         #expect(manager.current == nil)
@@ -741,10 +785,11 @@ private var AXIsProcessTrustedForTests: Bool { SystemAccessibilityPermission().i
         #expect(sizes.count == 1)
     }
 
-    @Test func withoutAReadingThereIsNoBarOrLip() {
+    @Test func withoutAReadingThereIsNoBarButTheShapeHolds() {
         let layout = IslandLayout(notch: CGSize(width: 179, height: 32), size: .regular)
         let content = IslandActivity.Content.brightness(increased: true, percentage: nil)
-        #expect(layout.islandSize(for: .activity(IslandActivity(content, at: .now))).height == 32)
+        #expect(content.level == nil)
+        #expect(layout.islandSize(for: .activity(IslandActivity(content, at: .now))).height == 32 + IslandLayout.levelRow)
     }
 
     @Test func wavesFillRatherThanSwapSymbols() {

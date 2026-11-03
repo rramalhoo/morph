@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: AppCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SingleInstance.takeOver()
         NSApp.mainMenu = MainMenuBuilder.make()
         let coordinator = AppCoordinator()
         self.coordinator = coordinator
@@ -18,6 +19,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         coordinator?.resumeAndOpenSettings()
         return false
+    }
+}
+
+/// Two copies draw two islands on top of each other and answer every key twice. LaunchServices only
+/// prevents that for the same path, so a copy elsewhere, such as a fresh build, takes over from the
+/// one already running. A notification works from inside the sandbox, where `terminate()` doesn't.
+private enum SingleInstance {
+    private static let name = Notification.Name("com.athene.morph.instance-started")
+    private nonisolated(unsafe) static var token: (any NSObjectProtocol)?
+
+    @MainActor
+    static func takeOver() {
+        let center = DistributedNotificationCenter.default()
+        center.postNotificationName(name, object: "\(ProcessInfo.processInfo.processIdentifier)",
+                                    userInfo: nil, deliverImmediately: true)
+        let ownID = "\(ProcessInfo.processInfo.processIdentifier)"
+        token = center.addObserver(forName: name, object: nil, queue: .main) { note in
+            guard note.object as? String != ownID else { return }
+            MainActor.assumeIsolated { NSApp.terminate(nil) }
+        }
     }
 }
 

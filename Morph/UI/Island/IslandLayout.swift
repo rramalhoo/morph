@@ -1,7 +1,7 @@
 import CoreGraphics
 
 enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
-    case home, timers, shelf
+    case home, timers, focus, battery, activities, shelf
 
     var id: String { rawValue }
 
@@ -9,6 +9,9 @@ enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .home: "Home"
         case .timers: "Timers"
+        case .focus: "Focus"
+        case .battery: "Battery"
+        case .activities: "Activities"
         case .shelf: "File Shelf"
         }
     }
@@ -17,6 +20,9 @@ enum ExpandedTab: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .home: "square.grid.2x2.fill"
         case .timers: "timer"
+        case .focus: "brain.head.profile"
+        case .battery: "battery.75percent"
+        case .activities: "dot.radiowaves.left.and.right"
         case .shelf: "tray.full.fill"
         }
     }
@@ -27,6 +33,8 @@ enum LiveContent: Equatable, Sendable {
     case timer
     case stopwatch
     case media
+    case focus
+    case external
 }
 
 enum IslandPresentation: Equatable, Sendable {
@@ -49,7 +57,10 @@ struct IslandLayout: Equatable, Sendable {
     static let canvas = CGSize(width: 720, height: 340)
     static let calibrationMargin: CGFloat = 4
     static let levelEar: CGFloat = 72
-    static let levelLip: CGFloat = 16
+    /// The row under the camera. One height for every level, so moving between volume and
+    /// brightness, or reaching mute, can't change the island's shape.
+    static let levelRow: CGFloat = 26
+    static let screenshotSize = CGSize(width: 420, height: 112)
 
     var notch: CGSize
     var size: IslandSizePreference
@@ -78,7 +89,9 @@ struct IslandLayout: Equatable, Sendable {
             switch activity.presentation {
             case .minimal: result = earSize(ear: 124)
             case .banner: result = CGSize(width: max(notch.width + 180, 380), height: notch.height + 52)
-            case .level: result = levelSize(for: activity.content)
+            case .level: result = CGSize(width: notch.width + 2 * Self.levelEar, height: notch.height + Self.levelRow)
+            case .screenshot:
+                result = CGSize(width: max(notch.width + 200, Self.screenshotSize.width), height: notch.height + Self.screenshotSize.height)
             }
         case .expanded:
             result = expandedSize
@@ -104,15 +117,10 @@ struct IslandLayout: Equatable, Sendable {
             case .minimal: Corners(top: 8, bottom: 14)
             case .banner: Corners(top: 12, bottom: 22)
             case .level: Corners(top: 8, bottom: 16)
+            case .screenshot: Corners(top: 12, bottom: 22)
             }
         case .expanded: Corners(top: 14, bottom: 26)
         }
-    }
-
-    /// Ears for the icon and value, and a lip below the camera for the bar: the middle of the
-    /// notch itself can't show anything. Without a real reading there's no bar and no lip.
-    private func levelSize(for content: IslandActivity.Content) -> CGSize {
-        CGSize(width: notch.width + 2 * Self.levelEar, height: notch.height + (content.level == nil ? 0 : Self.levelLip))
     }
 
     private func earSize(ear: CGFloat) -> CGSize {

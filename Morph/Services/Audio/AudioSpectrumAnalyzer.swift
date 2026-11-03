@@ -167,16 +167,23 @@ struct WaveformBarMapper: Sendable {
     }
 }
 
-/// Runs on the capture queue: mono FIFO in, bar levels out, at no more than `publishRate`.
+/// Runs on the analysis queue: mono FIFO in, bar levels out, at no more than `publishRate`. Its
+/// buffers are sized up front, so a steady stream of audio allocates nothing here.
 final class WaveformPipeline {
     private static let hop = AudioSpectrumAnalyzer.size / 2
     private static let publishRate = 30.0
+    /// Longer than any IO buffer Core Audio hands out. Anything beyond it is older than the window.
+    private static let chunk = 4096
 
     private let analyzer = AudioSpectrumAnalyzer()
     private let sampleRate: Float
     private let onLevels: @Sendable ([Float], Bool) -> Void
     private var mapper = WaveformBarMapper()
-    private var history = [Float](repeating: 0, count: AudioSpectrumAnalyzer.size)
+    private var mono = [Float](repeating: 0, count: chunk)
+    /// A ring, so appending never shifts memory.
+    private var ring = [Float](repeating: 0, count: AudioSpectrumAnalyzer.size)
+    private var ordered = [Float](repeating: 0, count: AudioSpectrumAnalyzer.size)
+    private var writeIndex = 0
     private var pendingCount = 0
     private var lastPublish: TimeInterval = 0
 
@@ -193,30 +200,37 @@ final class WaveformPipeline {
     /// `samples` are interleaved floats, mixed down here.
     func consume(_ samples: UnsafeBufferPointer<Float>, channels: Int) {
         let channels = max(channels, 1)
-        let frames = samples.count / channels
+        let frames = min(samples.count / channels, Self.chunk)
         guard frames > 0 else { return }
+        let skipped = samples.count / channels - frames
 
-        var mono = [Float](repeating: 0, count: frames)
         for frame in 0..<frames {
             var sum: Float = 0
-            for channel in 0..<channels { sum += samples[frame * channels + channel] }
+            let start = (skipped + frame) * channels
+            for channel in 0..<channels { sum += samples[start + channel] }
             mono[frame] = sum / Float(channels)
         }
-        append(mono)
+        mono.withUnsafeBufferPointer { ingest(UnsafeBufferPointer(rebasing: $0[0..<frames])) }
     }
 
-    func append(_ mono: [Float]) {
-        if mono.count >= history.count {
-            history = Array(mono.suffix(history.count))
-        } else {
-            history.removeFirst(mono.count)
-            history.append(contentsOf: mono)
+    func append(_ samples: [Float]) {
+        samples.withUnsafeBufferPointer { ingest($0) }
+    }
+
+    private func ingest(_ samples: UnsafeBufferPointer<Float>) {
+        for sample in samples.suffix(ring.count) {
+            ring[writeIndex] = sample
+            writeIndex = (writeIndex + 1) % ring.count
         }
-        pendingCount += mono.count
+        pendingCount += samples.count
         guard pendingCount >= Self.hop else { return }
         pendingCount = 0
 
-        let frame = analyzer.analyze(history, sampleRate: sampleRate)
+        let tail = ring.count - writeIndex
+        for index in 0..<ring.count {
+            ordered[index] = ring[index < tail ? writeIndex + index : index - tail]
+        }
+        let frame = analyzer.analyze(ordered, sampleRate: sampleRate)
         let levels = mapper.advance(frame == .silent ? nil : frame)
 
         let now = ProcessInfo.processInfo.systemUptime

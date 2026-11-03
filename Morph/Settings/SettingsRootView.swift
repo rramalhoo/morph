@@ -1,7 +1,7 @@
 import SwiftUI
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, appearance, behavior, music, devices, system, modules, advanced
+    case general, appearance, behavior, music, devices, system, screenshots, focus, activities, modules, advanced
 
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
@@ -14,6 +14,9 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .music: "waveform"
         case .devices: "airpodspro"
         case .system: "macbook"
+        case .screenshots: "camera.viewfinder"
+        case .focus: "brain.head.profile"
+        case .activities: "dot.radiowaves.left.and.right"
         case .modules: "square.grid.2x2"
         case .advanced: "wrench.and.screwdriver"
         }
@@ -40,6 +43,9 @@ struct SettingsRootView: View {
                 case .music: MusicSettingsView()
                 case .devices: DevicesSettingsView()
                 case .system: SystemSettingsView()
+                case .screenshots: ScreenshotSettingsView()
+                case .focus: FocusSettingsView()
+                case .activities: LiveActivitySettingsView()
                 case .modules: ModulesSettingsView()
                 case .advanced: AdvancedSettingsView(diagnostics: diagnostics)
                 }

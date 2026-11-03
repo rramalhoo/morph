@@ -7,6 +7,7 @@ import Foundation
 /// - A strictly higher priority interrupts what's showing; the interrupted activity returns to the
 ///   queue only if it asks to.
 /// - While held (the user is in the island), only `.timer` and above may present.
+/// - While a control is being dragged, only `.critical` may present, and nothing is taken away.
 /// - Queued activities that waited past `maximumWait` are dropped rather than shown late.
 struct ActivityQueue: Sendable {
     enum Outcome: Equatable, Sendable {
@@ -22,17 +23,17 @@ struct ActivityQueue: Sendable {
     private(set) var current: IslandActivity?
     private(set) var pending: [IslandActivity] = []
     private(set) var isHeld = false
+    private(set) var isInteracting = false
 
     private func canPresent(_ activity: IslandActivity) -> Bool {
-        !isHeld || activity.priority >= .timer
+        if isInteracting { return activity.priority >= .critical }
+        return !isHeld || activity.priority >= .timer
     }
 
     @discardableResult
     mutating func enqueue(_ activity: IslandActivity) -> Outcome {
         if let showing = current, showing.dedupeKey == activity.dedupeKey {
-            var merged = activity
-            merged = merged.keeping(id: showing.id)
-            current = merged
+            current = activity.keeping(id: showing.id)
             return .refreshedCurrent
         }
 
@@ -110,6 +111,12 @@ struct ActivityQueue: Sendable {
         }
     }
 
+    mutating func setInteracting(_ interacting: Bool, at now: ContinuousClock.Instant) {
+        guard interacting != isInteracting else { return }
+        isInteracting = interacting
+        if !interacting { promote(at: now) }
+    }
+
     private mutating func insert(_ activity: IslandActivity) {
         pending.append(activity)
         sortPending()
@@ -131,6 +138,8 @@ private extension IslandActivity {
         copy.duration = duration
         copy.dismissal = dismissal
         copy.dedupeKey = dedupeKey
+        copy.resumesAfterInterruption = resumesAfterInterruption
+        copy.maximumWait = maximumWait
         return copy
     }
 }

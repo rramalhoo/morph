@@ -179,12 +179,17 @@ struct LevelActivityTests {
         func priority(_ content: IslandActivity.Content) -> ActivityPriority {
             IslandActivity(content, at: scheduler.now).priority
         }
+        let external = ExternalActivity(id: "a", title: "A", symbol: "timer", state: .running, requestedPriority: .high, expiresAt: scheduler.now)
         let order = [priority(.batteryCritical(percentage: 3)),
+                     priority(.trackSkipped(forward: true)),
                      priority(.outputVolume(percentage: 1, muted: false)),
-                     priority(.deviceConnected(name: "", symbol: "", battery: nil)),
+                     priority(.screenshot(ScreenshotPreview(url: URL(fileURLWithPath: "/tmp/a.png")))),
                      priority(.timerCompleted(duration: 1)),
+                     priority(.external(external)),
+                     priority(.powerConnected(percentage: 50, charging: true)),
                      priority(.nowPlaying(title: "", artist: ""))]
         #expect(order == order.sorted(by: >))
+        #expect(Set(order.map(\.rawValue)).count == order.count)
     }
 
     @Test func volumeDoesNotInterruptACriticalAlert() {

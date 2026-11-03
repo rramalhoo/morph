@@ -42,6 +42,8 @@ final class IslandController {
     var showsCalibrationGuide = false
     /// A file is being dragged somewhere on screen, so the island offers itself as a target.
     var isFileDragActive = false
+    /// A drag started from the island, so the drag monitor shouldn't offer the island as a target.
+    var isExportingDrag = false
     /// Set from the window arrangement: full screen apps ask the island to step back.
     private(set) var cinema = CinemaState.normal
 
@@ -55,15 +57,20 @@ final class IslandController {
     private let timers: TimerService
     private let media: MediaController
     private let volume: VolumeService
+    private let focus: FocusService?
+    private let external: LiveActivityStore?
     private let scheduler: any Scheduling
 
     init(preferences: MorphPreferences, activities: ActivityManager, timers: TimerService,
-         media: MediaController, volume: VolumeService, scheduler: any Scheduling) {
+         media: MediaController, volume: VolumeService, scheduler: any Scheduling,
+         focus: FocusService? = nil, external: LiveActivityStore? = nil) {
         self.preferences = preferences
         self.activities = activities
         self.timers = timers
         self.media = media
         self.volume = volume
+        self.focus = focus
+        self.external = external
         self.scheduler = scheduler
     }
 
@@ -79,7 +86,8 @@ final class IslandController {
         case .hover:
             // A minimal activity is shorter than hover, and shrinking would drop the pointer off the
             // island. Hover shows volume itself.
-            if let activity = activities.current, activity.priority >= .timer, activity.presentation == .banner {
+            if let activity = activities.current, activity.priority >= .timer,
+               activity.presentation == .banner || activity.presentation == .screenshot {
                 return .activity(activity)
             }
             return isFileDragActive ? .dropTarget : .hover
@@ -111,6 +119,9 @@ final class IslandController {
             switch tab {
             case .home: true
             case .timers: preferences.timerEnabled
+            case .focus: preferences.focusEnabled && focus != nil
+            case .battery: true
+            case .activities: external?.activities.isEmpty == false
             case .shelf: preferences.shelfEnabled
             }
         }
@@ -123,10 +134,12 @@ final class IslandController {
 
     var liveContent: LiveContent? {
         guard preferences.liveActivitiesEnabled else { return nil }
+        if preferences.focusEnabled, focus?.session.isActive == true { return .focus }
         if preferences.timerEnabled {
             if timers.countdown.isRunning { return .timer }
             if timers.stopwatch.isRunning { return .stopwatch }
         }
+        if external?.featured != nil { return .external }
         if preferences.musicEnabled, media.isLive { return .media }
         return nil
     }
@@ -136,6 +149,7 @@ final class IslandController {
         machine.clickEnabled = preferences.clickToExpand
         let effects = machine.handle(event)
         effects.forEach(perform)
+        activities.setInteracting(machine.isInteracting)
         guard mode != machine.mode else { return }
         mode = machine.mode
         activities.setHeld(mode != .idle)
@@ -145,6 +159,8 @@ final class IslandController {
 
     /// A click acknowledges an alert that's waiting for one. Anything else opens the panel.
     func handleClick() {
+        // The preview is full of its own controls, and a stray click shouldn't lose it.
+        if activities.current?.presentation == .screenshot, !mode.isExpanded { return }
         if let activity = activities.current, !mode.isExpanded {
             activities.cancel(id: activity.id)
             if activity.dismissal == .acknowledge { return }
@@ -196,6 +212,8 @@ final class IslandController {
     func toggleFromMenu() {
         send(mode.isExpanded ? .escapePressed : .openRequested)
     }
+
+    var isPointerInside: Bool { machine.isPointerInside }
 
     func update(geometry: NotchGeometry?) {
         self.geometry = geometry

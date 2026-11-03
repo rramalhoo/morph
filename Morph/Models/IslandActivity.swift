@@ -2,17 +2,23 @@ import Foundation
 
 /// Ordered lowest first. A higher priority interrupts a lower one.
 enum ActivityPriority: Int, Comparable, Sendable {
-    /// Dropped rather than interrupting anything.
+    /// Decorative. Dropped rather than interrupting anything.
     case low
     case music
+    /// Battery and other passing events.
     case normal
+    /// Sent by another app through the local API. The API can't ask for anything above this.
+    case liveActivity
     /// From here up, an activity may appear while the user is hovering.
     case timer
     case device
+    case screenshot
     /// Volume and brightness: direct feedback for something the user just did.
     case level
+    /// The answer to a gesture or a command.
+    case interaction
     case high
-    /// Shown even inside the expanded panel.
+    /// Shown even inside the expanded panel, and while a control is being dragged.
     case critical
 
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
@@ -25,6 +31,8 @@ enum ActivityPresentation: Equatable, Sendable {
     case banner
     /// The volume and brightness HUD.
     case level
+    /// A captured image with actions.
+    case screenshot
 }
 
 enum ActivityDismissal: Equatable, Sendable {
@@ -35,8 +43,9 @@ enum ActivityDismissal: Equatable, Sendable {
 
 /// One transient thing the island wants to say.
 struct IslandActivity: Identifiable, Equatable, Sendable {
-    /// How long a level HUD eases off before the island closes. Follows the hold time.
+    /// The last part of a level HUD's hold, when it eases off before the island closes.
     static let levelFade = Duration.milliseconds(280)
+    /// From the last change to the island starting to close.
     static let levelHold = Duration.milliseconds(1200)
 
     enum Content: Equatable, Sendable {
@@ -59,6 +68,10 @@ struct IslandActivity: Identifiable, Equatable, Sendable {
         case outputChanged(name: String, symbol: String)
         case trackSkipped(forward: Bool)
         case actionFailed(message: String)
+        case screenshot(ScreenshotPreview)
+        case focusFinished(FocusPhase)
+        case peripheralLow(name: String, percentage: Int)
+        case external(ExternalActivity)
     }
 
     let id: UUID
@@ -111,7 +124,7 @@ struct IslandActivity: Identifiable, Equatable, Sendable {
             (resumesAfterInterruption, maximumWait) = (false, .seconds(5))
         case .volumeChanged, .outputVolume, .brightness:
             // One key shared by all levels, so successive changes update a single activity in place.
-            (priority, presentation, duration) = (.level, .level, Self.levelHold + Self.levelFade)
+            (priority, presentation, duration) = (.level, .level, Self.levelHold)
             (dismissal, dedupeKey) = (.automatic, "level")
             (resumesAfterInterruption, maximumWait) = (false, .seconds(1))
         case .deviceConnected, .deviceDisconnected, .outputChanged:
@@ -119,13 +132,29 @@ struct IslandActivity: Identifiable, Equatable, Sendable {
             (dismissal, dedupeKey) = (.automatic, "device")
             (resumesAfterInterruption, maximumWait) = (false, .seconds(8))
         case .trackSkipped:
-            (priority, presentation, duration) = (.music, .minimal, .milliseconds(1200))
+            (priority, presentation, duration) = (.interaction, .minimal, .milliseconds(1200))
             (dismissal, dedupeKey) = (.automatic, "now-playing")
             (resumesAfterInterruption, maximumWait) = (false, .seconds(1))
         case .actionFailed:
-            (priority, presentation, duration) = (.normal, .banner, .seconds(4))
+            (priority, presentation, duration) = (.interaction, .banner, .seconds(4))
             (dismissal, dedupeKey) = (.automatic, "action-failed")
             (resumesAfterInterruption, maximumWait) = (false, .seconds(5))
+        case .screenshot:
+            (priority, presentation, duration) = (.screenshot, .screenshot, .seconds(6))
+            (dismissal, dedupeKey) = (.automatic, "screenshot")
+            (resumesAfterInterruption, maximumWait) = (true, .seconds(20))
+        case .focusFinished:
+            (priority, presentation, duration) = (.timer, .banner, .seconds(6))
+            (dismissal, dedupeKey) = (.automatic, "focus")
+            (resumesAfterInterruption, maximumWait) = (true, .seconds(120))
+        case .peripheralLow(let name, _):
+            (priority, presentation, duration) = (.normal, .banner, .seconds(5))
+            (dismissal, dedupeKey) = (.automatic, "peripheral-\(name)")
+            (resumesAfterInterruption, maximumWait) = (false, .seconds(60))
+        case .external(let activity):
+            (priority, presentation, duration) = (.liveActivity, .banner, .seconds(3))
+            (dismissal, dedupeKey) = (.automatic, "external-\(activity.id)")
+            (resumesAfterInterruption, maximumWait) = (false, .seconds(10))
         }
     }
 }
@@ -148,6 +177,10 @@ extension IslandActivity.Content {
         case .deviceConnected(_, let symbol, _), .deviceDisconnected(_, let symbol), .outputChanged(_, let symbol): symbol
         case .trackSkipped(let forward): forward ? "forward.fill" : "backward.fill"
         case .actionFailed: "exclamationmark.triangle.fill"
+        case .screenshot: "camera.viewfinder"
+        case .focusFinished(let phase): phase.symbol
+        case .peripheralLow: "battery.25percent"
+        case .external(let activity): activity.symbol
         }
     }
 
@@ -168,6 +201,10 @@ extension IslandActivity.Content {
         case .outputChanged(let name, _): name
         case .trackSkipped(let forward): forward ? "Next" : "Previous"
         case .actionFailed: "Couldn't do that"
+        case .screenshot: "Screenshot"
+        case .focusFinished(let phase): "\(phase.title) finished"
+        case .peripheralLow(let name, _): "\(name) battery low"
+        case .external(let activity): activity.title
         }
     }
 
@@ -187,6 +224,10 @@ extension IslandActivity.Content {
         case .deviceDisconnected, .trackSkipped: nil
         case .outputChanged: "Audio output"
         case .actionFailed(let message): message
+        case .screenshot(let preview): preview.name
+        case .focusFinished(let phase): phase == .focus ? "Time for a break" : "Ready to focus"
+        case .peripheralLow(_, let percentage): "\(percentage)% remaining"
+        case .external(let activity): activity.subtitle
         }
     }
 }
@@ -232,7 +273,7 @@ extension IslandActivity.Content {
     /// Feedback for an action in progress isn't history.
     var appearsInRecent: Bool {
         switch self {
-        case .volumeChanged, .outputVolume, .brightness, .trackSkipped: false
+        case .volumeChanged, .outputVolume, .brightness, .trackSkipped, .screenshot: false
         default: true
         }
     }

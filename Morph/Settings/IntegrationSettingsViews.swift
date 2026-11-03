@@ -6,12 +6,13 @@ struct MusicSettingsView: View {
     @Environment(WaveformService.self) private var waveform
 
     private var statusText: String {
-        switch waveform.status {
-        case .off: "Starts when music plays"
-        case .connecting: "Connecting"
-        case .live: "Following the music"
-        case .noSignal: "No audio received. Check the permission below."
-        case .unavailable: "Couldn't reach the player's audio"
+        switch waveform.state {
+        case .idle, .stopped: "Starts when music plays"
+        case .requestingPermission: "Waiting for sound. macOS may ask for permission."
+        case .starting: "Connecting"
+        case .capturing: waveform.hasSignal ? "Following the music" : "Connected. The music is quiet."
+        case .recovering: "Reconnecting"
+        case .unavailable: waveform.lastError ?? "Couldn't reach the player's audio"
         }
     }
 
@@ -30,6 +31,15 @@ struct MusicSettingsView: View {
                 Picker("When no audio can be analyzed", selection: $preferences.waveformFallback) {
                     ForEach(WaveformFallback.allCases) { Text($0.title).tag($0) }
                 }
+                Toggle("Show capture diagnostics", isOn: $preferences.waveDiagnostics)
+                if preferences.waveDiagnostics {
+                    // Timelines keep the buffer age current, and only exist while this is open.
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(waveform.diagnostics)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
             } header: {
                 Text("Audio Visualization")
             } footer: {
@@ -43,9 +53,13 @@ struct MusicSettingsView: View {
                 Text("macOS asks the first time music plays. It doesn't tell apps the answer, so a denied permission shows up here as no audio received.")
             }
             Section {
+                Toggle("Now Playing Pro", isOn: $preferences.nowPlayingPro)
                 Toggle("Album artwork ambient colors", isOn: $preferences.ambientColors)
+                Toggle("Drag the progress bar to seek", isOn: $preferences.progressControls)
+            } header: {
+                Text("Player")
             } footer: {
-                Text("A soft light from the cover's main color, behind the player. The island stays black.")
+                Text("A soft light from the cover's colors, behind the player, which drifts slowly with Now Playing Pro. The island stays black, and Reduce Motion keeps the light still.")
             }
         }
     }
@@ -62,8 +76,13 @@ struct DevicesSettingsView: View {
             Section {
                 Toggle("AirPods connection activities", isOn: $preferences.deviceActivities)
                 Toggle("Peripheral battery status when available", isOn: $preferences.peripheralBattery)
+                Toggle("Show audio devices in the Battery tab", isOn: $preferences.batteryAudioDevices)
+                Toggle("Alert when a peripheral's battery is low", isOn: $preferences.peripheralAlerts)
+                    .disabled(!preferences.peripheralBattery)
+                Stepper("Check every \(preferences.deviceRefreshMinutes) min while needed", value: $preferences.deviceRefreshMinutes,
+                        in: MorphPreferences.deviceRefreshRange)
             } footer: {
-                Text("Shows a battery level only if macOS provides one through a public API. AirPods usually don't expose it, and then only the connection appears.")
+                Text("Shows a battery level only if macOS reports one. AirPods usually don't, and then only the connection appears. Morph reads this only when a device connects, while the Battery tab is open, or for alerts.")
             }
             Section("Connected") {
                 if let output = volume.output {

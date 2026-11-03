@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The volume and brightness HUD. It always lays out at the size it will finish at, and the island
-/// reveals it as it opens, so nothing inside moves or reflows during the spring.
+/// The volume and brightness HUD: icon, bar and value in one row under the camera, because nothing
+/// can be drawn on the notch itself. It always lays out at the size it will finish at, and the
+/// island reveals it as it opens, so nothing inside moves or reflows during the spring.
 struct LevelHUDView: View {
     let content: IslandActivity.Content
     let notch: CGSize
@@ -15,18 +16,20 @@ struct LevelHUDView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            NotchEars(notch: notch, inset: inset) {
+            Color.clear.frame(height: notch.height)
+            HStack(spacing: MorphSpacing.s) {
                 LevelGlyph(content: content)
-            } trailing: {
+                if let level = content.level {
+                    LevelBar(fraction: level)
+                        .scaleEffect(x: hasAppeared || motion.reduced ? 1 : 0.4, anchor: .leading)
+                } else {
+                    Spacer(minLength: 0)
+                }
                 LevelReadout(content: content)
             }
-            if let level = content.level {
-                LevelBar(fraction: level)
-                    .padding(.horizontal, inset + MorphSpacing.m)
-                    .padding(.top, MorphSpacing.xxs)
-                    .scaleEffect(x: hasAppeared || motion.reduced ? 1 : 0.4, anchor: .center)
-                    .opacity(hasAppeared ? 1 : 0)
-            }
+            .padding(.horizontal, inset + MorphSpacing.m)
+            .frame(height: IslandLayout.levelRow, alignment: .top)
+            .opacity(hasAppeared ? 1 : 0)
         }
         .frame(width: size.width, height: size.height, alignment: .top)
         .opacity(activities.isConcluding ? 0.45 : 1)
@@ -125,7 +128,7 @@ struct LevelReadout: View {
             .fixedSize()
             .contentTransition(motion.reduced ? .identity : .numericText(value: content.level ?? 0))
             .animation(motion.levelFill, value: text)
-            .frame(minWidth: 40, alignment: .trailing)
+            .frame(width: content.level == nil ? nil : 42, alignment: .trailing)
     }
 }
 
